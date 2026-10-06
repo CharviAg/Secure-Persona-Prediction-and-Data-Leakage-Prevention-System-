@@ -63,6 +63,7 @@ RED = "#EF4444"
 
 # Store logged-in username
 current_username = "User"
+current_user_id = None
 
 
 # =========================================================
@@ -362,8 +363,9 @@ def login_page():
         user = login_user(username, password)
 
         if user:
-            global current_username
+            global current_username, current_user_id
             current_username = username
+            current_user_id = user[0]
 
             messagebox.showinfo(
                 "Login Successful",
@@ -741,6 +743,15 @@ def register_page():
 
     login_button.pack(pady=5)
 
+# =========================================================
+# LOGOUT
+# =========================================================
+
+def logout():
+    global current_username, current_user_id
+    current_username = "User"
+    current_user_id = None
+    welcome_page()
 
 # =========================================================
 # DASHBOARD
@@ -802,7 +813,7 @@ def dashboard_page():
         width=90,
         fg_color=INPUT_COLOR,
         hover_color="#374151",
-        command=welcome_page
+        command=logout
     )
 
     logout_button.pack(
