@@ -2,6 +2,7 @@ from security import verify_password
 from security import hash_password
 from database import register_user
 from database import login_user
+from predict_persona import predict_cluster
 try:
     import customtkinter as ctk
 except ModuleNotFoundError:
@@ -1110,93 +1111,86 @@ def customer_form_page():
         pady=15
     )
 
-    def validate_customer():
+from predict_persona import predict_cluster
 
-        age = age_entry.get().strip()
-        income = income_entry.get().strip()
-        spending = spending_entry.get().strip()
+def validate_customer():
 
-        if age == "" or income == "" or spending == "":
-            messagebox.showerror(
-                "Input Error",
-                "Please enter Age, Annual Income and Spending Score."
-            )
-            return
+    age = age_entry.get().strip()
+    income = income_entry.get().strip()
+    spending = spending_entry.get().strip()
 
-        try:
-            age_value = float(age)
-            income_value = float(income)
-            spending_value = float(spending)
-        except ValueError:
-            messagebox.showerror(
-                "Input Error",
-                "Age, income and spending score must be numbers."
-            )
-            return
+    if age == "" or income == "" or spending == "":
+        messagebox.showerror(
+            "Input Error",
+            "Please enter Age, Annual Income and Spending Score."
+        )
+        return
 
-        if age_value <= 0:
-            messagebox.showerror(
-                "Input Error",
-                "Age must be greater than zero."
-            )
-            return
+    try:
+        age_value = float(age)
+        income_value = float(income)
+        spending_value = float(spending)
+    except ValueError:
+        messagebox.showerror(
+            "Input Error",
+            "Age, income and spending score must be numbers."
+        )
+        return
 
-        if income_value < 0:
-            messagebox.showerror(
-                "Input Error",
-                "Income cannot be negative."
-            )
-            return
+    if age_value <= 0:
+        messagebox.showerror("Input Error", "Age must be greater than zero.")
+        return
+    if income_value < 0:
+        messagebox.showerror("Input Error", "Income cannot be negative.")
+        return
+    if spending_value < 0:
+        messagebox.showerror("Input Error", "Spending score cannot be negative.")
+        return
 
-        if spending_value < 0:
-            messagebox.showerror(
-                "Input Error",
-                "Spending score cannot be negative."
-            )
-            return
+    gender_value = gender_var.get()  # TEMP placeholder until a gender field is added to the form
 
-        messagebox.showinfo(
-            "Success",
-            "Customer information is valid!\n\n"
-            "The ML model will be connected by Member 3."
+    cluster = predict_cluster(age_value, gender_value, income_value, spending_value)
+
+    # TEMP placeholder — Member 4 will replace this with real persona/recommendation logic
+    persona = f"Cluster {cluster} Persona"
+    recommendation = "Recommendations pending Member 4's mapping."
+
+    try:
+        save_prediction(
+            current_user_id,
+            age_value,
+            gender_value,
+            income_value,
+            spending_value,
+            cluster,
+            persona,
+            recommendation
         )
 
-    predict_button = ctk.CTkButton(
-        form,
-        text="PREDICT PERSONA",
-        width=300,
-        height=48,
-        corner_radius=10,
-        fg_color=BLUE,
-        hover_color=BLUE_HOVER,
-        font=("Arial", 15, "bold"),
-        command=validate_customer
-    )
+        messagebox.showinfo(
+            "Prediction Complete",
+            f"Predicted Cluster: {cluster}\n\nSaved to your history."
+        )
 
-    predict_button.grid(
-        row=3,
-        column=0,
-        columnspan=2,
-        pady=20
-    )
+    except Exception as e:
+        messagebox.showerror("Error", f"Could not save prediction.\n\n{e}")
 
-    back_button = ctk.CTkButton(
-        form,
-        text="← Back to Dashboard",
-        width=180,
-        fg_color="transparent",
-        hover_color=INPUT_COLOR,
-        text_color=GRAY,
-        command=dashboard_page
-    )
+gender_var = ctk.StringVar(value="Female")
 
-    back_button.grid(
-        row=4,
-        column=0,
-        columnspan=2,
-        pady=5
-    )
+gender_menu = ctk.CTkOptionMenu(
+    form,
+    width=250,
+    values=["Male", "Female"],
+    variable=gender_var,
+    fg_color=INPUT_COLOR
+)
 
+gender_menu.grid(
+    row=1,
+    column=1,
+    padx=20,
+    pady=15
+)
 
 # =========================================================
 # START PROGRAM
