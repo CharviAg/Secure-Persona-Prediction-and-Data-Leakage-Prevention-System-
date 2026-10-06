@@ -56,37 +56,21 @@ def register_user(name, email, phone, username, password_hash):
 
     print("User registered successfully!")
 
-def login_user(username, password):
-    from security import verify_password
-
+def login_user(username, password_hash):
     connection = connect_db()
     cursor = connection.cursor()
 
     cursor.execute("""
         SELECT user_id, name, email, phone, username, password_hash
         FROM users
-        WHERE username = ?
-    """, (username,))
+        WHERE username = ? AND password_hash = ?
+    """, (username, password_hash))
 
     user = cursor.fetchone()
-    
-    print("USER FROM DATABASE:", user)
-
-    if user:
-        print("STORED HASH:", user[5])
 
     connection.close()
 
-    if user:
-        stored_hash = user[5]
-
-        try:
-            if verify_password(password, stored_hash):
-                return user
-        except Exception as e:
-            print("Password verification error:", e)
-
-    return None
+    return user
 
 def save_prediction(user_id, age, gender, income, spending_score,
                     cluster, persona, recommendation):
