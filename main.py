@@ -968,10 +968,7 @@ def dashboard_page():
         text="View Recommendations",
         width=190,
         fg_color=INPUT_COLOR,
-        command=lambda: messagebox.showinfo(
-            "Recommendations",
-            "Recommendations will be connected by Member 4."
-        )
+        command=recommendation_page
     ).pack(pady=15)
 
 
