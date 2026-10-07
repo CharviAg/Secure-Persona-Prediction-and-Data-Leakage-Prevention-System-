@@ -1,7 +1,11 @@
 import sqlite3
 
-DATABASE_NAME = "customer_persona.db"
+import os
 
+DATABASE_NAME = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "customer_persona.db"
+)
 
 def connect_db():
     connection = sqlite3.connect(DATABASE_NAME)
