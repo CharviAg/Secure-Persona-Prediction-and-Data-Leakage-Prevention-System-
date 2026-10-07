@@ -1159,10 +1159,26 @@ def validate_customer():
 
     cluster = predict_cluster(age_value, gender_value, income_value, spending_value)
 
-    # TEMP placeholder — Member 4 will replace this with real persona/recommendation logic
-    persona = f"Cluster {cluster} Persona"
-    recommendation = "Recommendations pending Member 4's mapping."
+    
+   # Member 4 - Generate recommendations based on persona
 
+     cluster_to_persona = {
+        0: "High-Value Customer",
+        1: "Budget Customer",
+        2: "Potential Customer",
+        3: "Impulsive Spender"
+    }
+    
+    persona = cluster_to_persona.get(
+        cluster,
+        "Unknown Persona"
+    )
+    
+    recommendations = get_recommendations(persona)
+    
+    recommendation = "\n".join(
+        "• " + item for item in recommendations
+    )
     try:
         save_prediction(
             current_user_id,
