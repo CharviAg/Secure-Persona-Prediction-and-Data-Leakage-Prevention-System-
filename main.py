@@ -3,6 +3,17 @@ from security import hash_password
 from database import register_user
 from database import login_user
 from predict_persona import predict_cluster
+from recommendation.recommendation import get_recommendations
+
+current_persona = None
+
+CLUSTER_TO_PERSONA = {
+    0: "High-Value Customer",
+    1: "Budget Customer",
+    2: "Potential Customer",
+    3: "Impulsive Spender"
+}
+
 try:
     import customtkinter as ctk
 except ModuleNotFoundError:
@@ -63,7 +74,6 @@ RED = "#EF4444"
 
 # Store logged-in username
 current_username = "User"
-current_user_id = None
 
 
 # =========================================================
@@ -363,9 +373,8 @@ def login_page():
         user = login_user(username, password)
 
         if user:
-            global current_username, current_user_id
+            global current_username
             current_username = username
-            current_user_id = user[0]
 
             messagebox.showinfo(
                 "Login Successful",
@@ -743,15 +752,6 @@ def register_page():
 
     login_button.pack(pady=5)
 
-# =========================================================
-# LOGOUT
-# =========================================================
-
-def logout():
-    global current_username, current_user_id
-    current_username = "User"
-    current_user_id = None
-    welcome_page()
 
 # =========================================================
 # DASHBOARD
@@ -813,7 +813,7 @@ def dashboard_page():
         width=90,
         fg_color=INPUT_COLOR,
         hover_color="#374151",
-        command=logout
+        command=welcome_page
     )
 
     logout_button.pack(
@@ -968,7 +968,10 @@ def dashboard_page():
         text="View Recommendations",
         width=190,
         fg_color=INPUT_COLOR,
-        command=recommendation_page
+        command=lambda: messagebox.showinfo(
+            "Recommendations",
+            "Recommendations will be connected by Member 4."
+        )
     ).pack(pady=15)
 
 
@@ -1119,102 +1122,136 @@ def customer_form_page():
         pady=15
     )
 
-from predict_persona import predict_cluster
+    def validate_customer():
+        
+        global current_persona
 
-def validate_customer():
+        age = age_entry.get().strip()
+        income = income_entry.get().strip()
+        spending = spending_entry.get().strip()
 
-    age = age_entry.get().strip()
-    income = income_entry.get().strip()
-    spending = spending_entry.get().strip()
+        if age == "" or income == "" or spending == "":
+            messagebox.showerror(
+                "Input Error",
+                "Please enter Age, Annual Income and Spending Score."
+            )
+            return
 
-    if age == "" or income == "" or spending == "":
-        messagebox.showerror(
-            "Input Error",
-            "Please enter Age, Annual Income and Spending Score."
-        )
-        return
+        try:
+            age_value = float(age)
+            income_value = float(income)
+            spending_value = float(spending)
+        except ValueError:
+            messagebox.showerror(
+                "Input Error",
+                "Age, income and spending score must be numbers."
+            )
+            return
 
-    try:
-        age_value = float(age)
-        income_value = float(income)
-        spending_value = float(spending)
-    except ValueError:
-        messagebox.showerror(
-            "Input Error",
-            "Age, income and spending score must be numbers."
-        )
-        return
+        if age_value <= 0:
+            messagebox.showerror(
+                "Input Error",
+                "Age must be greater than zero."
+            )
+            return
 
-    if age_value <= 0:
-        messagebox.showerror("Input Error", "Age must be greater than zero.")
-        return
-    if income_value < 0:
-        messagebox.showerror("Input Error", "Income cannot be negative.")
-        return
-    if spending_value < 0:
-        messagebox.showerror("Input Error", "Spending score cannot be negative.")
-        return
+        if income_value < 0:
+            messagebox.showerror(
+                "Input Error",
+                "Income cannot be negative."
+            )
+            return
 
-    gender_value = gender_var.get()  # TEMP placeholder until a gender field is added to the form
-
-    cluster = predict_cluster(age_value, gender_value, income_value, spending_value)
-
-    
-   # Member 4 - Generate recommendations based on persona
-
-     cluster_to_persona = {
-        0: "High-Value Customer",
-        1: "Budget Customer",
-        2: "Potential Customer",
-        3: "Impulsive Spender"
-    }
-    
-    persona = cluster_to_persona.get(
-        cluster,
-        "Unknown Persona"
-    )
-    
-    recommendations = get_recommendations(persona)
-    
-    recommendation = "\n".join(
-        "• " + item for item in recommendations
-    )
-    try:
-        save_prediction(
-            current_user_id,
-            age_value,
-            gender_value,
-            income_value,
-            spending_value,
-            cluster,
-            persona,
-            recommendation
-        )
+        if spending_value < 0:
+            messagebox.showerror(
+                "Input Error",
+                "Spending score cannot be negative."
+            )
+            return
 
         messagebox.showinfo(
-            "Prediction Complete",
-            f"Predicted Cluster: {cluster}\n\nSaved to your history."
+            "Success",
+            "Customer information is valid!\n\n"
+            "The ML model will be connected by Member 3."
         )
+        
+        try:
 
-    except Exception as e:
-        messagebox.showerror("Error", f"Could not save prediction.\n\n{e}")
+            # Member 3 - ML prediction
+            cluster = predict_cluster(
+                age_value,
+                gender,
+                income_value,
+                spending_value
+            )
 
-gender_var = ctk.StringVar(value="Female")
+            # Convert cluster to persona
+            current_persona = CLUSTER_TO_PERSONA.get(
+                cluster,
+                "Unknown Persona"
+            )
 
-gender_menu = ctk.CTkOptionMenu(
-    form,
-    width=250,
-    values=["Male", "Female"],
-    variable=gender_var,
-    fg_color=INPUT_COLOR
-)
+            # Member 4 - Recommendations
+            recommendations = get_recommendations(
+                current_persona
+            )
 
-gender_menu.grid(
-    row=1,
-    column=1,
-    padx=20,
-    pady=15
-)
+            recommendation_text = "\n".join(
+                "• " + item for item in recommendations
+            )
+
+            # Display result
+            messagebox.showinfo(
+                "Prediction Result",
+                f"Cluster: {cluster}\n"
+                f"Persona: {current_persona}\n\n"
+                f"Recommendations:\n"
+                f"{recommendation_text}"
+            )
+
+        except Exception as e:
+
+            messagebox.showerror(
+                "Prediction Error",
+                f"Could not predict customer persona.\n\n{e}"
+            )
+
+    predict_button = ctk.CTkButton(
+        form,
+        text="PREDICT PERSONA",
+        width=300,
+        height=48,
+        corner_radius=10,
+        fg_color=BLUE,
+        hover_color=BLUE_HOVER,
+        font=("Arial", 15, "bold"),
+        command=validate_customer
+    )
+
+    predict_button.grid(
+        row=3,
+        column=0,
+        columnspan=2,
+        pady=20
+    )
+
+    back_button = ctk.CTkButton(
+        form,
+        text="← Back to Dashboard",
+        width=180,
+        fg_color="transparent",
+        hover_color=INPUT_COLOR,
+        text_color=GRAY,
+        command=dashboard_page
+    )
+
+    back_button.grid(
+        row=4,
+        column=0,
+        columnspan=2,
+        pady=5
+    )
+
 
 # =========================================================
 # START PROGRAM
