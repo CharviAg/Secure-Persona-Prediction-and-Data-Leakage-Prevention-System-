@@ -1,122 +1,625 @@
 
+import sqlite3
 import streamlit as st
 import pandas as pd
-from pathlib import Path
+
+from database import (
+    DATABASE_NAME,
+    create_tables,
+    register_user,
+    save_prediction,
+    get_prediction_history,
+    update_user,
+    delete_user,
+)
+from security import (
+    hash_password,
+    verify_password,
+    check_password_strength,
+)
 from predict_persona import predict_cluster
 
-# ---------------- PAGE CONFIG ----------------
+
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
+
 st.set_page_config(
     page_title="Customer Persona Analytics",
-    page_icon="🔐",
-    layout="wide"
+    page_icon="CP",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-BASE_DIR = Path(__file__).resolve().parent
 
-# ---------------- LOAD DATA ----------------
-@st.cache_data
-def load_data():
-    file_path = BASE_DIR / "Mall_Customers.csv"
-    if file_path.exists():
-        return pd.read_csv(file_path)
-    return None
+# --------------------------------------------------
+# DATABASE INITIALIZATION
+# --------------------------------------------------
 
-df = load_data()
+create_tables()
 
-# ---------------- SIDEBAR ----------------
-st.sidebar.title("🔐 Persona Analytics")
-page = st.sidebar.radio(
-    "Navigation",
-    ["Dashboard", "Predict Persona", "Customer Data", "About"]
+
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if "page" not in st.session_state:
+    st.session_state.page = "Welcome"
+
+if "last_prediction" not in st.session_state:
+    st.session_state.last_prediction = None
+
+
+# --------------------------------------------------
+# DESIGN / CSS
+# --------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #0B1120;
+        color: #F8FAFC;
+    }
+
+    [data-testid="stSidebar"] {
+        background-color: #111827;
+        border-right: 1px solid #263449;
+    }
+
+    h1, h2, h3 {
+        color: #F8FAFC;
+    }
+
+    p, label, li {
+        color: #CBD5E1;
+    }
+
+    .brand {
+        font-size: 28px;
+        font-weight: 800;
+        color: #60A5FA;
+        letter-spacing: 1px;
+    }
+
+    .subtitle {
+        color: #94A3B8;
+        font-size: 14px;
+    }
+
+    .hero {
+        background: #111827;
+        border: 1px solid #263449;
+        border-radius: 18px;
+        padding: 30px;
+        margin: 10px 0 24px 0;
+    }
+
+    .hero-title {
+        font-size: 34px;
+        font-weight: 750;
+        color: #F8FAFC;
+        line-height: 1.2;
+    }
+
+    .hero-text {
+        font-size: 16px;
+        color: #94A3B8;
+        margin-top: 12px;
+    }
+
+    .metric-card {
+        background: #111827;
+        border: 1px solid #263449;
+        border-radius: 14px;
+        padding: 20px;
+        min-height: 115px;
+    }
+
+    .metric-label {
+        color: #94A3B8;
+        font-size: 13px;
+    }
+
+    .metric-value {
+        color: #60A5FA;
+        font-size: 27px;
+        font-weight: 750;
+        margin-top: 8px;
+    }
+
+    .section-card {
+        background: #111827;
+        border: 1px solid #263449;
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 16px;
+    }
+
+    div.stButton > button {
+        background-color: #3B82F6;
+        color: white;
+        border: none;
+        border-radius: 9px;
+        min-height: 42px;
+        font-weight: 600;
+    }
+
+    div.stButton > button:hover {
+        background-color: #2563EB;
+        color: white;
+        border: none;
+    }
+
+    div[data-testid="stForm"] {
+        background-color: #111827;
+        border: 1px solid #263449;
+        border-radius: 14px;
+        padding: 22px;
+    }
+
+    input, textarea {
+        border-radius: 8px !important;
+    }
+
+    [data-testid="stMetric"] {
+        background-color: #111827;
+        border: 1px solid #263449;
+        border-radius: 12px;
+        padding: 16px;
+    }
+
+    hr {
+        border-color: #263449;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.sidebar.caption("Machine Learning • Customer Insights")
 
-# ---------------- DASHBOARD ----------------
-if page == "Dashboard":
-    st.title("📊 Customer Persona Analytics")
-    st.write("Explore customer behaviour and discover customer segments.")
+# --------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------
 
-    if df is not None:
-        c1, c2, c3 = st.columns(3)
+def find_user_for_login(identity):
+    """
+    Find a user by username or email.
 
-        c1.metric("Total Customers", len(df))
+    We query SQLite directly because database.login_user()
+    expects an exact password hash, which is incompatible
+    with bcrypt's randomly salted hashes.
+    """
+    connection = sqlite3.connect(DATABASE_NAME)
 
-        if "Age" in df.columns:
-            c2.metric("Average Age", f"{df['Age'].mean():.1f} years")
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT user_id, name, email, phone, username, password_hash
+            FROM users
+            WHERE username = ? OR email = ?
+            """,
+            (identity.strip(), identity.strip()),
+        )
+        return cursor.fetchone()
+    finally:
+        connection.close()
 
-        income_col = "Annual Income (k$)"
-        if income_col in df.columns:
-            c3.metric(
-                "Average Annual Income",
-                f"${df[income_col].mean():.1f}k"
-            )
 
-        st.divider()
-        st.subheader("Customer Insights")
+def get_persona_name(cluster):
+    """
+    Assign a readable label to a predicted cluster.
 
-        left, right = st.columns(2)
+    Cluster labels are generated by the trained model.
+    These names are illustrative and should be validated
+    against your actual training data.
+    """
+    personas = {
+        0: "High-Value Customer",
+        1: "Budget-Conscious Customer",
+        2: "Potential Customer",
+        3: "Impulsive Spender",
+        4: "Average Customer",
+    }
 
-        with left:
-            if "Age" in df.columns:
-                st.write("**Customer Age Distribution**")
-                st.bar_chart(df["Age"].value_counts().sort_index())
+    return personas.get(cluster, f"Customer Segment {cluster}")
 
-        with right:
-            score_col = "Spending Score (1-100)"
-            if score_col in df.columns:
-                st.write("**Spending Score Distribution**")
-                st.bar_chart(
-                    df[score_col].value_counts().sort_index()
-                )
 
-        if income_col in df.columns and score_col in df.columns:
-            st.write("**Income vs Spending Score**")
-            st.scatter_chart(
-                df,
-                x=income_col,
-                y=score_col
-            )
+def get_recommendation(persona):
+    recommendations = {
+        "High-Value Customer": (
+            "Offer loyalty rewards, premium products, early access "
+            "to launches, and personalized offers."
+        ),
+        "Budget-Conscious Customer": (
+            "Highlight discounts, bundles, value packs, and "
+            "limited-time savings."
+        ),
+        "Potential Customer": (
+            "Use introductory offers, product recommendations, "
+            "and personalized follow-up campaigns."
+        ),
+        "Impulsive Spender": (
+            "Promote trending products, limited-time collections, "
+            "and complementary items without encouraging overspending."
+        ),
+        "Average Customer": (
+            "Use relevant product suggestions, seasonal campaigns, "
+            "and loyalty incentives to improve engagement."
+        ),
+    }
 
-    else:
-        st.warning(
-            "Mall_Customers.csv was not found. "
-            "Place it in the same folder as app.py."
+    return recommendations.get(
+        persona,
+        "Use personalized recommendations and review customer activity "
+        "to identify suitable offers.",
+    )
+
+
+def show_brand():
+    st.markdown(
+        '<div class="brand">CP <span style="color:#F8FAFC;">Analytics</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="subtitle">Understand customers. Make smarter decisions.</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def logout():
+    st.session_state.user = None
+    st.session_state.page = "Welcome"
+    st.session_state.last_prediction = None
+    st.rerun()
+
+
+def show_metric(label, value):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# --------------------------------------------------
+# WELCOME PAGE
+# --------------------------------------------------
+
+def welcome_page():
+    show_brand()
+    st.write("")
+
+    left, right = st.columns([1.15, 1], gap="large")
+
+    with left:
+        st.markdown(
+            """
+            <div class="hero">
+                <div class="hero-title">
+                    Know your customers.<br>
+                    Grow your business.
+                </div>
+                <div class="hero-text">
+                    Turn customer data into meaningful segments,
+                    understand spending behaviour, and discover
+                    opportunities for smarter marketing.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-# ---------------- PREDICT PERSONA ----------------
-elif page == "Predict Persona":
-    st.title("🎯 Predict Customer Persona")
-    st.write("Enter customer details to predict their K-means cluster.")
+        st.markdown("### Your customer intelligence workspace")
+        st.write("• Predict customer segments using your trained ML model")
+        st.write("• Save and review your prediction history")
+        st.write("• Get recommendations tailored to customer segments")
 
-    with st.form("persona_form"):
+    with right:
+        st.markdown("### Welcome")
+        st.write("Sign in to continue or create your account.")
+
+        if st.button("Login to your account", use_container_width=True):
+            st.session_state.page = "Login"
+            st.rerun()
+
+        if st.button("Create a new account", use_container_width=True):
+            st.session_state.page = "Register"
+            st.rerun()
+
+
+# --------------------------------------------------
+# LOGIN PAGE
+# --------------------------------------------------
+
+def login_page():
+    show_brand()
+    st.write("")
+
+    left, right = st.columns([1, 1.1], gap="large")
+
+    with left:
+        st.markdown("## Welcome back")
+        st.write(
+            "Sign in to access your customer persona dashboard, "
+            "predictions, and saved history."
+        )
+
+        st.markdown("---")
+        st.write("**Customer insights**")
+        st.write("Predict segments from customer attributes.")
+        st.write("**Prediction history**")
+        st.write("Review previous predictions whenever you need them.")
+        st.write("**Personalized recommendations**")
+        st.write("Explore ideas for engaging different customer segments.")
+
+    with right:
+        st.markdown("### Login")
+
+        with st.form("login_form"):
+            identity = st.text_input(
+                "Username or email",
+                placeholder="Enter your username or email",
+            )
+
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Enter your password",
+            )
+
+            submitted = st.form_submit_button(
+                "Login",
+                use_container_width=True,
+            )
+
+        if submitted:
+            if not identity.strip() or not password:
+                st.error("Please enter both your username/email and password.")
+            else:
+                try:
+                    user = find_user_for_login(identity)
+
+                    if user and verify_password(password, user[5]):
+                        st.session_state.user = {
+                            "user_id": user[0],
+                            "name": user[1],
+                            "email": user[2],
+                            "phone": user[3],
+                            "username": user[4],
+                        }
+                        st.session_state.page = "Dashboard"
+                        st.success("Login successful!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect username/email or password.")
+
+                except Exception as error:
+                    st.error(f"Login failed: {error}")
+
+        if st.button("Create an account", use_container_width=True):
+            st.session_state.page = "Register"
+            st.rerun()
+
+        if st.button("Back to welcome page", use_container_width=True):
+            st.session_state.page = "Welcome"
+            st.rerun()
+
+
+# --------------------------------------------------
+# REGISTRATION PAGE
+# --------------------------------------------------
+
+def register_page():
+    show_brand()
+    st.write("")
+
+    st.markdown("## Create your account")
+    st.write("Register to start using Customer Persona Analytics.")
+
+    with st.form("register_form"):
+        name = st.text_input("Full name")
+        email = st.text_input("Email address")
+        phone = st.text_input("Phone number")
+        username = st.text_input("Choose a username")
+        password = st.text_input("Create password", type="password")
+        confirm_password = st.text_input(
+            "Confirm password",
+            type="password",
+        )
+
+        if password:
+            strength = check_password_strength(password)
+
+            if strength == "Strong":
+                st.success("Password strength: Strong")
+            elif strength == "Medium":
+                st.warning("Password strength: Medium")
+            else:
+                st.error("Password strength: Weak")
+
+        submitted = st.form_submit_button(
+            "Create account",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if not all(
+            [
+                name.strip(),
+                email.strip(),
+                phone.strip(),
+                username.strip(),
+                password,
+                confirm_password,
+            ]
+        ):
+            st.error("Please complete every field.")
+        elif "@" not in email or "." not in email.split("@")[-1]:
+            st.error("Please enter a valid email address.")
+        elif len(password) < 8:
+            st.error("Your password must contain at least 8 characters.")
+        elif password != confirm_password:
+            st.error("The passwords do not match.")
+        else:
+            try:
+                register_user(
+                    name.strip(),
+                    email.strip().lower(),
+                    phone.strip(),
+                    username.strip(),
+                    hash_password(password),
+                )
+                st.success("Account created successfully! You can now log in.")
+                st.session_state.page = "Login"
+                st.rerun()
+
+            except sqlite3.IntegrityError:
+                st.error(
+                    "That username or email is already registered. "
+                    "Please choose another."
+                )
+            except Exception as error:
+                st.error(f"Could not create account: {error}")
+
+    if st.button("Already have an account? Login"):
+        st.session_state.page = "Login"
+        st.rerun()
+
+    if st.button("Back to welcome page"):
+        st.session_state.page = "Welcome"
+        st.rerun()
+
+
+# --------------------------------------------------
+# DASHBOARD PAGE
+# --------------------------------------------------
+
+def dashboard_page():
+    user = st.session_state.user
+
+    show_brand()
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div class="hero-title">
+                Hello, {user["name"].replace("<", "&lt;").replace(">", "&gt;")}!
+            </div>
+            <div class="hero-text">
+                Welcome to your customer intelligence dashboard.
+                Predict customer segments and explore useful insights.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        history = get_prediction_history(user["user_id"])
+    except Exception:
+        history = []
+
+    total_predictions = len(history)
+    latest_persona = history[0][6] if history else "No predictions yet"
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        show_metric("Total predictions", total_predictions)
+
+    with col2:
+        show_metric("Latest customer segment", latest_persona)
+
+    with col3:
+        show_metric("Account", "Active")
+
+    st.write("")
+    st.markdown("### Workspace")
+
+    col1, col2, col3 = st.columns(3, gap="medium")
+
+    with col1:
+        st.markdown("#### Predict persona")
+        st.write("Enter customer details and predict a segment.")
+        if st.button("Open prediction", use_container_width=True):
+            st.session_state.page = "Predict"
+            st.rerun()
+
+    with col2:
+        st.markdown("#### Prediction history")
+        st.write("Review your previously saved predictions.")
+        if st.button("View history", use_container_width=True):
+            st.session_state.page = "History"
+            st.rerun()
+
+    with col3:
+        st.markdown("#### Account settings")
+        st.write("View and update your profile details.")
+        if st.button("Manage account", use_container_width=True):
+            st.session_state.page = "Account"
+            st.rerun()
+
+
+# --------------------------------------------------
+# PREDICTION PAGE
+# --------------------------------------------------
+
+def prediction_page():
+    show_brand()
+
+    st.markdown("## Predict customer persona")
+    st.write(
+        "Enter the customer's information below. "
+        "Your trained model will predict a customer cluster."
+    )
+
+    with st.form("prediction_form"):
         col1, col2 = st.columns(2)
 
         with col1:
             age = st.number_input(
-                "Age", min_value=18, max_value=100, value=25
+                "Age",
+                min_value=1,
+                max_value=120,
+                value=25,
+                step=1,
             )
+
             gender = st.selectbox(
-                "Gender", ["Male", "Female"]
+                "Gender",
+                ["Male", "Female"],
             )
 
         with col2:
             income = st.number_input(
-                "Annual Income (k$)",
+                "Annual income",
                 min_value=0.0,
-                max_value=1000.0,
-                value=60.0,
-                step=1.0
+                max_value=100000000.0,
+                value=50000.0,
+                step=1000.0,
+                help="Use the same income units used to train your model.",
             )
+
             spending_score = st.slider(
-                "Spending Score",
-                min_value=1,
-                max_value=100,
-                value=75
+                "Spending score",
+                min_value=0.0,
+                max_value=100.0,
+                value=50.0,
+                step=1.0,
             )
 
         submitted = st.form_submit_button(
-            "Predict Persona", type="primary"
+            "Predict customer persona",
+            use_container_width=True,
         )
 
     if submitted:
@@ -125,77 +628,281 @@ elif page == "Predict Persona":
                 int(age),
                 gender,
                 float(income),
-                float(spending_score)
+                float(spending_score),
             )
 
-            st.success("Prediction completed successfully!")
+            persona = get_persona_name(cluster)
+            recommendation = get_recommendation(persona)
 
-            st.subheader("Prediction Result")
-            st.metric("Predicted Cluster", f"Cluster {cluster}")
+            save_prediction(
+                st.session_state.user["user_id"],
+                int(age),
+                gender,
+                float(income),
+                float(spending_score),
+                int(cluster),
+                persona,
+                recommendation,
+            )
 
+            st.session_state.last_prediction = {
+                "age": int(age),
+                "gender": gender,
+                "income": float(income),
+                "spending_score": float(spending_score),
+                "cluster": int(cluster),
+                "persona": persona,
+                "recommendation": recommendation,
+            }
+
+            st.success("Prediction completed and saved!")
+
+        except FileNotFoundError:
+            st.error(
+                "The model files were not found. Ensure "
+                "kmeans_model.pkl and scaler.pkl are in your repository."
+            )
+        except Exception as error:
+            st.error(f"Prediction failed: {error}")
+
+    result = st.session_state.last_prediction
+
+    if result:
+        st.markdown("---")
+        st.markdown("### Prediction result")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### Predicted segment")
+            st.markdown(
+                f"""
+                <div class="hero">
+                    <div class="hero-title">{result["persona"]}</div>
+                    <div class="hero-text">
+                        Model cluster: {result["cluster"]}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col2:
+            st.markdown("#### Customer details")
+            st.write(f'**Age:** {result["age"]}')
+            st.write(f'**Gender:** {result["gender"]}')
+            st.write(f'**Annual income:** {result["income"]:,.2f}')
+            st.write(f'**Spending score:** {result["spending_score"]:.0f}')
+
+        st.markdown("#### Suggested action")
+        st.info(result["recommendation"])
+
+        st.caption(
+            "Segment names and recommendations are illustrative. "
+            "Validate cluster meanings against your model's training data."
+        )
+
+    if st.button("Back to dashboard"):
+        st.session_state.page = "Dashboard"
+        st.rerun()
+
+
+# --------------------------------------------------
+# HISTORY PAGE
+# --------------------------------------------------
+
+def history_page():
+    show_brand()
+
+    st.markdown("## Prediction history")
+    st.write("Your previously saved customer persona predictions.")
+
+    try:
+        history = get_prediction_history(
+            st.session_state.user["user_id"]
+        )
+
+        if not history:
             st.info(
-                "This is the cluster assigned by your trained "
-                "K-means model. Its business meaning must be "
-                "confirmed using the training data."
+                "You have no saved predictions yet. "
+                "Make your first prediction to see it here."
+            )
+        else:
+            df = pd.DataFrame(
+                history,
+                columns=[
+                    "Prediction ID",
+                    "Age",
+                    "Gender",
+                    "Annual Income",
+                    "Spending Score",
+                    "Cluster",
+                    "Persona",
+                    "Recommendation",
+                ],
             )
 
-            result = pd.DataFrame([{
-                "Age": age,
-                "Gender": gender,
-                "Annual Income (k$)": income,
-                "Spending Score (1-100)": spending_score,
-                "Predicted Cluster": cluster
-            }])
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            st.dataframe(result, use_container_width=True)
+            csv_data = df.to_csv(index=False).encode("utf-8")
 
             st.download_button(
-                "Download Prediction",
-                data=result.to_csv(index=False),
-                file_name="persona_prediction.csv",
-                mime="text/csv"
+                "Download history as CSV",
+                data=csv_data,
+                file_name="customer_persona_history.csv",
+                mime="text/csv",
+                use_container_width=True,
             )
 
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
+    except Exception as error:
+        st.error(f"Could not load history: {error}")
 
-# ---------------- CUSTOMER DATA ----------------
-elif page == "Customer Data":
-    st.title("👥 Customer Dataset")
+    if st.button("Back to dashboard"):
+        st.session_state.page = "Dashboard"
+        st.rerun()
 
-    if df is not None:
-        st.write("Explore the customer records used in this project.")
-        st.dataframe(df, use_container_width=True)
 
-        st.download_button(
-            "Download Customer Data",
-            data=df.to_csv(index=False),
-            file_name="customer_data.csv",
-            mime="text/csv"
+# --------------------------------------------------
+# ACCOUNT PAGE
+# --------------------------------------------------
+
+def account_page():
+    show_brand()
+
+    user = st.session_state.user
+
+    st.markdown("## Account settings")
+    st.write("View and update your profile information.")
+
+    with st.form("account_form"):
+        name = st.text_input("Full name", value=user["name"])
+        email = st.text_input("Email address", value=user["email"])
+        phone = st.text_input("Phone number", value=user["phone"])
+        username = st.text_input(
+            "Username",
+            value=user["username"],
+            disabled=True,
         )
+
+        submitted = st.form_submit_button(
+            "Save changes",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if not name.strip() or not email.strip() or not phone.strip():
+            st.error("Name, email, and phone are required.")
+        elif "@" not in email or "." not in email.split("@")[-1]:
+            st.error("Please enter a valid email address.")
+        else:
+            try:
+                update_user(
+                    user["user_id"],
+                    name.strip(),
+                    email.strip().lower(),
+                    phone.strip(),
+                )
+
+                st.session_state.user["name"] = name.strip()
+                st.session_state.user["email"] = email.strip().lower()
+                st.session_state.user["phone"] = phone.strip()
+
+                st.success("Your profile has been updated.")
+                st.rerun()
+
+            except sqlite3.IntegrityError:
+                st.error("That email address is already in use.")
+            except Exception as error:
+                st.error(f"Could not update your profile: {error}")
+
+    st.markdown("---")
+    st.markdown("### Delete account")
+    st.warning(
+        "Deleting your account is permanent. Your saved predictions "
+        "may remain in the database because of the existing database "
+        "design."
+    )
+
+    confirm_delete = st.checkbox(
+        "I understand that this action cannot be easily undone."
+    )
+
+    if st.button("Delete my account", use_container_width=True):
+        if not confirm_delete:
+            st.error("Please confirm before deleting your account.")
+        else:
+            try:
+                delete_user(user["user_id"])
+                st.success("Your account has been deleted.")
+                logout()
+            except Exception as error:
+                st.error(f"Could not delete account: {error}")
+
+    if st.button("Back to dashboard"):
+        st.session_state.page = "Dashboard"
+        st.rerun()
+
+
+# --------------------------------------------------
+# SIDEBAR NAVIGATION
+# --------------------------------------------------
+
+def sidebar_navigation():
+    user = st.session_state.user
+
+    with st.sidebar:
+        show_brand()
+        st.write("")
+        st.markdown("---")
+
+        st.markdown("### Navigation")
+        st.caption(f"Signed in as **{user['username']}**")
+
+        pages = {
+            "Dashboard": "Dashboard",
+            "Predict persona": "Predict",
+            "Prediction history": "History",
+            "Account settings": "Account",
+        }
+
+        for label, page in pages.items():
+            if st.button(label, use_container_width=True):
+                st.session_state.page = page
+                st.rerun()
+
+        st.markdown("---")
+
+        if st.button("Logout", use_container_width=True):
+            logout()
+
+
+# --------------------------------------------------
+# MAIN ROUTER
+# --------------------------------------------------
+
+if st.session_state.user is None:
+    if st.session_state.page == "Register":
+        register_page()
+    elif st.session_state.page == "Login":
+        login_page()
     else:
-        st.error("Mall_Customers.csv was not found.")
+        welcome_page()
 
-# ---------------- ABOUT ----------------
-elif page == "About":
-    st.title("ℹ️ About the Project")
+else:
+    sidebar_navigation()
 
-    st.markdown("""
-    ### Secure Persona Prediction System
+    current_page = st.session_state.page
 
-    This project uses machine learning to group customers
-    according to their characteristics and spending behaviour.
-
-    **Technologies**
-    - Python
-    - Streamlit
-    - Pandas and NumPy
-    - Scikit-learn
-    - K-means clustering
-
-    **Features**
-    - Customer analytics dashboard
-    - Customer persona prediction
-    - Dataset exploration
-    - Downloadable prediction results
-    """)
+    if current_page == "Predict":
+        prediction_page()
+    elif current_page == "History":
+        history_page()
+    elif current_page == "Account":
+        account_page()
+    else:
+        st.session_state.page = "Dashboard"
+        dashboard_page()
