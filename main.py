@@ -1,18 +1,10 @@
-from security import verify_password
 from security import hash_password
-from database import register_user
-from database import login_user
-from predict_persona import predict_cluster
-from recommendation.recommendation import get_recommendations
+from predict_persona import predict_persona
+from recommendation.recommendation import get_offers, get_explanation
 
 current_persona = None
-
-CLUSTER_TO_PERSONA = {
-    0: "High-Value Customer",
-    1: "Budget Customer",
-    2: "Potential Customer",
-    3: "Impulsive Spender"
-}
+current_user_id = None
+last_result = None        # latest prediction (shown on the result page)
 
 try:
     import customtkinter as ctk
@@ -35,6 +27,7 @@ import re
 
 
 from database import (
+    create_tables,
     register_user,
     login_user,
     save_prediction,
@@ -373,13 +366,11 @@ def login_page():
         user = login_user(username, password)
 
         if user:
-            global current_username
-            current_username = username
-
-            messagebox.showinfo(
-                "Login Successful",
-                "Login successful!"
-            )
+            global current_username, current_user_id, current_persona, last_result
+            current_user_id = user[0]
+            current_username = user[4]
+            current_persona = None
+            last_result = None
 
             dashboard_page()
 
@@ -627,8 +618,6 @@ def register_page():
     confirm_entry.pack(pady=3)
 
     def perform_registration():
-        print("HASH FUNCTION:", hash_password)
-        print("TEST BCRYPT HASH:", hash_password("Test@1234"))
         name = name_entry.get().strip()
         email = email_entry.get().strip()
         phone = phone_entry.get().strip()
@@ -666,6 +655,13 @@ def register_page():
             messagebox.showerror(
                 "Registration Error",
                 "Please enter your phone number."
+            )
+            return
+
+        if not re.match(r"^\+?[0-9]{10,15}$", phone):
+            messagebox.showerror(
+                "Registration Error",
+                "Please enter a valid phone number (10-15 digits)."
             )
             return
 
@@ -713,11 +709,6 @@ def register_page():
                 password_hash
             )
 
-            messagebox.showinfo(
-                "Registration Successful",
-                "Account created successfully!"
-            )
-
             login_page()
 
         except Exception as e:
@@ -751,6 +742,294 @@ def register_page():
     )
 
     login_button.pack(pady=5)
+
+
+# =========================================================
+# SESSION / HISTORY / RECOMMENDATION HELPERS
+# =========================================================
+
+def logout():
+    global current_username, current_user_id, current_persona, last_result
+    current_username = "User"
+    current_user_id = None
+    current_persona = None
+    last_result = None
+    welcome_page()
+
+
+PERSONA_STYLE = {
+    "High-Value Customer": GREEN,
+    "Budget Customer": BLUE,
+    "Potential Customer": YELLOW,
+    "Impulsive Spender": RED,
+}
+
+PERSONA_INFO = {
+    "High-Value Customer": "High income and high spending",
+    "Budget Customer": "Lower income and careful spending",
+    "Potential Customer": "High income but low spending",
+    "Impulsive Spender": "High spending for their income",
+}
+
+
+def create_topbar(parent):
+    """Top bar shared by all inner pages."""
+    topbar = ctk.CTkFrame(parent, height=70, fg_color=CARD_COLOR, corner_radius=0)
+    topbar.pack(fill="x")
+
+    ctk.CTkLabel(
+        topbar, text="CP", width=45, height=45, corner_radius=12,
+        fg_color=BLUE, font=("Arial", 18, "bold")
+    ).pack(side="left", padx=20, pady=12)
+
+    ctk.CTkLabel(
+        topbar, text="Customer Persona Analytics",
+        text_color=WHITE, font=("Arial", 20, "bold")
+    ).pack(side="left")
+
+    ctk.CTkButton(
+        topbar, text="Logout", width=90,
+        fg_color=INPUT_COLOR, hover_color="#374151", command=logout
+    ).pack(side="right", padx=20)
+
+    ctk.CTkButton(
+        topbar, text="Dashboard", width=100,
+        fg_color=INPUT_COLOR, hover_color="#374151", command=dashboard_page
+    ).pack(side="right")
+
+
+def new_page():
+    clear_screen()
+    main = ctk.CTkFrame(app, fg_color=BG_COLOR, corner_radius=0)
+    main.pack(fill="both", expand=True)
+    create_topbar(main)
+    return main
+
+
+def stat_bar(parent, label, text, value, color):
+    """Label + value + progress bar (value between 0 and 1)."""
+    row = ctk.CTkFrame(parent, fg_color="transparent")
+    row.pack(fill="x", padx=25, pady=(10, 0))
+
+    ctk.CTkLabel(row, text=label, text_color=GRAY,
+                 font=("Arial", 12)).pack(side="left")
+    ctk.CTkLabel(row, text=text, text_color=WHITE,
+                 font=("Arial", 13, "bold")).pack(side="right")
+
+    bar = ctk.CTkProgressBar(parent, height=10, progress_color=color,
+                             fg_color=INPUT_COLOR)
+    bar.pack(fill="x", padx=25, pady=(4, 0))
+    bar.set(max(0, min(1, value)))
+
+
+def recommendation_cards(parent, offers, color, columns=2):
+    """Offer cards: title, short detail, coupon code and expiry date."""
+    grid = ctk.CTkFrame(parent, fg_color="transparent")
+    grid.pack(fill="x", padx=20, pady=5)
+
+    for c in range(columns):
+        grid.grid_columnconfigure(c, weight=1, uniform="offer")
+
+    for i, offer in enumerate(offers):
+        card = ctk.CTkFrame(grid, fg_color=INPUT_COLOR, corner_radius=12)
+        card.grid(row=i // columns, column=i % columns,
+                  padx=6, pady=6, sticky="nsew")
+
+        ctk.CTkLabel(
+            card, text=offer["title"], text_color=WHITE,
+            font=("Arial", 14, "bold"), wraplength=215, justify="left",
+            anchor="w"
+        ).pack(anchor="w", padx=14, pady=(10, 2))
+
+        ctk.CTkLabel(
+            card, text=offer["detail"], text_color=GRAY,
+            font=("Arial", 12), wraplength=215, justify="left",
+            anchor="w"
+        ).pack(anchor="w", padx=14)
+
+        footer = ctk.CTkFrame(card, fg_color="transparent")
+        footer.pack(fill="x", padx=14, pady=(6, 10))
+
+        ctk.CTkLabel(
+            footer, text="CODE: " + offer["code"], text_color=BG_COLOR,
+            fg_color=color, corner_radius=6, height=22,
+            font=("Arial", 11, "bold")
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            footer, text="Valid till " + offer["valid_till"],
+            text_color=GRAY, font=("Arial", 11)
+        ).pack(side="right")
+
+
+def result_page(result):
+    """Shows the prediction result on a full page (no popup)."""
+    persona = result["persona"]
+    color = PERSONA_STYLE.get(persona, BLUE)
+    offers = result["offers"]
+    reason = get_explanation(
+        persona, f"{result['income']:,.0f}K", f"{result['spending']:.0f}"
+    )
+
+    main = new_page()
+
+    ctk.CTkLabel(main, text="Prediction Result", text_color=WHITE,
+                 font=("Arial", 26, "bold")).pack(anchor="w", padx=35, pady=(15, 8))
+
+    body = ctk.CTkFrame(main, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=30)
+
+    # ---------- left: persona + customer details
+    left = ctk.CTkFrame(body, fg_color=CARD_COLOR, corner_radius=18, width=330)
+    left.pack(side="left", fill="y", padx=(5, 10), pady=5)
+    left.pack_propagate(False)
+
+    ctk.CTkLabel(left, text="PREDICTED PERSONA", text_color=GRAY,
+                 font=("Arial", 12, "bold")).pack(pady=(22, 8))
+
+    ctk.CTkLabel(
+        left, text=persona, text_color=BG_COLOR, fg_color=color,
+        corner_radius=14, width=270, height=52, font=("Arial", 19, "bold")
+    ).pack()
+
+    ctk.CTkLabel(left, text=PERSONA_INFO.get(persona, ""), text_color=GRAY,
+                 font=("Arial", 12)).pack(pady=(8, 0))
+
+    ctk.CTkLabel(left, text=f"Cluster {result['cluster']}  •  "
+                            f"{result['gender']}, age {result['age']}",
+                 text_color=WHITE, font=("Arial", 13)).pack(pady=(4, 6))
+
+    stat_bar(left, "Spending Score", f"{result['spending']:.0f} / 100",
+             result["spending"] / 100, color)
+    stat_bar(left, "Annual Income", f"Rs. {result['income']:,.0f}K",
+             result["income"] / 1200, color)
+
+    # ---------- right: reason + recommendations
+    right = ctk.CTkFrame(body, fg_color=CARD_COLOR, corner_radius=18)
+    right.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=5)
+
+    ctk.CTkLabel(right, text="WHY THIS PERSONA?", text_color=GRAY,
+                 font=("Arial", 12, "bold")).pack(anchor="w", padx=25, pady=(22, 6))
+
+    ctk.CTkLabel(
+        right, text=reason, text_color=WHITE, font=("Arial", 14),
+        wraplength=470, justify="left"
+    ).pack(anchor="w", padx=25)
+
+    ctk.CTkLabel(right, text="RECOMMENDED OFFERS", text_color=GRAY,
+                 font=("Arial", 12, "bold")).pack(anchor="w", padx=25, pady=(20, 4))
+
+    recommendation_cards(right, offers, color)
+
+    # ---------- bottom buttons
+    status = ctk.CTkLabel(main, text="", text_color=GREEN, font=("Arial", 12))
+    status.pack(pady=(4, 0))
+
+    def download_report():
+        try:
+            from reports.report_generator import generate_report
+            path = generate_report(
+                current_username,
+                result["income"] * 1000,
+                result["spending"],
+                persona,
+                reason,
+                [f"{o['title']} (code {o['code']}, valid till {o['valid_till']})"
+                 for o in offers]
+            )
+            status.configure(text="PDF report saved: " + path, text_color=GREEN)
+        except Exception as e:
+            status.configure(text=f"Could not create report: {e}", text_color=RED)
+
+    buttons = ctk.CTkFrame(main, fg_color="transparent")
+    buttons.pack(pady=(4, 15))
+
+    ctk.CTkButton(buttons, text="Predict Another", width=170, height=40,
+                  command=customer_form_page).pack(side="left", padx=8)
+    ctk.CTkButton(buttons, text="Download PDF Report", width=190, height=40,
+                  fg_color=INPUT_COLOR, hover_color="#374151",
+                  command=download_report).pack(side="left", padx=8)
+    ctk.CTkButton(buttons, text="View History", width=150, height=40,
+                  fg_color=INPUT_COLOR, hover_color="#374151",
+                  command=history_page).pack(side="left", padx=8)
+
+
+def recommendations_page():
+    """Latest prediction's recommendations, or an overview of every persona."""
+    if last_result is not None:
+        result_page(last_result)
+        return
+
+    main = new_page()
+
+    ctk.CTkLabel(main, text="Offers & Recommendations", text_color=WHITE,
+                 font=("Arial", 26, "bold")).pack(anchor="w", padx=35, pady=(15, 2))
+    ctk.CTkLabel(main, text="No prediction yet - here are the offers we use for each persona.",
+                 text_color=GRAY, font=("Arial", 13)).pack(anchor="w", padx=37, pady=(0, 8))
+
+    grid = ctk.CTkFrame(main, fg_color="transparent")
+    grid.pack(fill="both", expand=True, padx=30)
+    grid.grid_columnconfigure((0, 1), weight=1)
+
+    for i, (persona, color) in enumerate(PERSONA_STYLE.items()):
+        card = ctk.CTkFrame(grid, fg_color=CARD_COLOR, corner_radius=16)
+        card.grid(row=i // 2, column=i % 2, padx=8, pady=8, sticky="nsew")
+
+        ctk.CTkLabel(card, text=persona, text_color=BG_COLOR, fg_color=color,
+                     corner_radius=10, height=34, width=220,
+                     font=("Arial", 15, "bold")).pack(pady=(14, 4))
+        ctk.CTkLabel(card, text=PERSONA_INFO[persona], text_color=GRAY,
+                     font=("Arial", 12)).pack(pady=(0, 6))
+
+        for offer in get_offers(persona):
+            ctk.CTkLabel(card, text="●  " + offer["title"] + "   [" + offer["code"] + "]",
+                         text_color=WHITE, font=("Arial", 13),
+                         anchor="w").pack(anchor="w", padx=30, pady=1)
+
+        ctk.CTkLabel(card, text="").pack(pady=2)
+
+    ctk.CTkButton(main, text="Start Prediction", width=200, height=40,
+                  command=customer_form_page).pack(pady=12)
+
+
+def history_page():
+    """Prediction history shown as a table on its own page (no popup)."""
+    main = new_page()
+
+    ctk.CTkLabel(main, text="Prediction History", text_color=WHITE,
+                 font=("Arial", 26, "bold")).pack(anchor="w", padx=35, pady=(15, 8))
+
+    history = get_prediction_history(current_user_id)
+
+    if not history:
+        empty = ctk.CTkFrame(main, fg_color=CARD_COLOR, corner_radius=18)
+        empty.pack(fill="x", padx=35, pady=20)
+        ctk.CTkLabel(empty, text="No predictions yet", text_color=WHITE,
+                     font=("Arial", 20, "bold")).pack(pady=(35, 5))
+        ctk.CTkLabel(empty, text="Your predictions will appear here.",
+                     text_color=GRAY, font=("Arial", 13)).pack()
+        ctk.CTkButton(empty, text="Start Prediction", width=190, height=40,
+                      command=customer_form_page).pack(pady=25)
+        return
+
+    table = ctk.CTkScrollableFrame(main, fg_color=CARD_COLOR, corner_radius=16)
+    table.pack(fill="both", expand=True, padx=35, pady=(0, 20))
+
+    headers = ["#", "Age", "Gender", "Income (K)", "Score", "Cluster", "Persona"]
+    widths = [50, 60, 80, 110, 70, 80, 200]
+
+    for col, (h, w) in enumerate(zip(headers, widths)):
+        ctk.CTkLabel(table, text=h, text_color=GRAY, width=w, anchor="w",
+                     font=("Arial", 12, "bold")).grid(row=0, column=col, padx=6, pady=8)
+
+    for r, (pid, age, gender, income, score, cluster, persona, _rec) in enumerate(history, start=1):
+        color = PERSONA_STYLE.get(persona, WHITE)
+        values = [pid, age, gender, f"{income:,.0f}", f"{score:.0f}", cluster, persona]
+        for col, (v, w) in enumerate(zip(values, widths)):
+            ctk.CTkLabel(table, text=str(v), width=w, anchor="w",
+                         text_color=color if col == 6 else WHITE,
+                         font=("Arial", 13, "bold" if col == 6 else "normal")
+                         ).grid(row=r, column=col, padx=6, pady=5)
 
 
 # =========================================================
@@ -813,7 +1092,7 @@ def dashboard_page():
         width=90,
         fg_color=INPUT_COLOR,
         hover_color="#374151",
-        command=welcome_page
+        command=logout
     )
 
     logout_button.pack(
@@ -928,10 +1207,7 @@ def dashboard_page():
         text="View History",
         width=170,
         fg_color=INPUT_COLOR,
-        command=lambda: messagebox.showinfo(
-            "Prediction History",
-            "Prediction history will be connected by Member 2."
-        )
+        command=history_page
     ).pack(pady=15)
 
     # Recommendation card
@@ -951,27 +1227,24 @@ def dashboard_page():
 
     ctk.CTkLabel(
         recommendation_card,
-        text="RECOMMENDATIONS",
+        text="OFFERS",
         text_color=GRAY,
         font=("Arial", 12, "bold")
     ).pack(pady=(25, 8))
 
     ctk.CTkLabel(
         recommendation_card,
-        text="Product Suggestions",
+        text="Personalised Offers",
         text_color=WHITE,
         font=("Arial", 19, "bold")
     ).pack(pady=5)
 
     ctk.CTkButton(
         recommendation_card,
-        text="View Recommendations",
+        text="View Offers",
         width=190,
         fg_color=INPUT_COLOR,
-        command=lambda: messagebox.showinfo(
-            "Recommendations",
-            "Recommendations will be connected by Member 4."
-        )
+        command=recommendations_page
     ).pack(pady=15)
 
 
@@ -1001,16 +1274,16 @@ def customer_form_page():
         font=("Arial", 30, "bold")
     )
 
-    title.pack(pady=(35, 5))
+    title.pack(pady=(18, 2))
 
     subtitle = ctk.CTkLabel(
         main,
-        text="Enter customer information for persona prediction",
+        text="Fill in the customer's details below.  Fields marked * are required.",
         text_color=GRAY,
         font=("Arial", 14)
     )
 
-    subtitle.pack(pady=(0, 20))
+    subtitle.pack(pady=(0, 8))
 
     form = ctk.CTkFrame(
         main,
@@ -1022,119 +1295,123 @@ def customer_form_page():
 
     form.place(
         relx=0.5,
-        rely=0.58,
-        anchor="center"
+        rely=1.0,
+        y=-12,
+        anchor="s"
     )
 
-    age_entry = ctk.CTkEntry(
+    def make_field(row, col, label, hint, placeholder, required=False):
+        """Label above the box, example inside it, short explanation below it."""
+        cell = ctk.CTkFrame(form, fg_color="transparent")
+        cell.grid(row=row, column=col, padx=22, pady=(8, 2), sticky="w")
+
+        ctk.CTkLabel(
+            cell,
+            text=label + (" *" if required else ""),
+            text_color=WHITE,
+            font=("Arial", 13, "bold")
+        ).pack(anchor="w")
+
+        entry = ctk.CTkEntry(
+            cell,
+            width=270,
+            height=36,
+            placeholder_text=placeholder,
+            fg_color=INPUT_COLOR,
+            border_width=0
+        )
+        entry.pack(pady=(3, 2))
+
+        ctk.CTkLabel(
+            cell,
+            text=hint,
+            text_color=GRAY,
+            font=("Arial", 11)
+        ).pack(anchor="w")
+
+        return entry
+
+    age_entry = make_field(
+        0, 0, "Age (in years)",
+        "How old the customer is",
+        "e.g. 28", required=True)
+
+    income_entry = make_field(
+        0, 1, "Annual Income (Rs. thousands)",
+        "Yearly income in thousands: 650 = Rs. 650,000",
+        "e.g. 650", required=True)
+
+    spending_entry = make_field(
+        1, 0, "Spending Score (1-100)",
+        "How much they spend: 1 = very low, 100 = very high",
+        "e.g. 60", required=True)
+
+    purchases_entry = make_field(
+        1, 1, "Purchases per Month",
+        "Optional - number of purchases made each month",
+        "e.g. 4")
+
+    online_entry = make_field(
+        2, 0, "Online Shopping Frequency",
+        "Optional - how often they shop online",
+        "e.g. Weekly")
+
+    category_entry = make_field(
+        2, 1, "Preferred Category",
+        "Optional - the product type they like most",
+        "e.g. Fashion")
+
+    gender_cell = ctk.CTkFrame(form, fg_color="transparent")
+    gender_cell.grid(row=3, column=0, padx=22, pady=(8, 2), sticky="w")
+
+    ctk.CTkLabel(
+        gender_cell,
+        text="Gender *",
+        text_color=WHITE,
+        font=("Arial", 13, "bold")
+    ).pack(anchor="w")
+
+    gender_menu = ctk.CTkOptionMenu(
+        gender_cell,
+        values=["Male", "Female"],
+        width=270,
+        height=36
+    )
+
+    gender_menu.set("Male")
+    gender_menu.pack(pady=(3, 2))
+
+    ctk.CTkLabel(
+        gender_cell,
+        text="Choose the customer's gender",
+        text_color=GRAY,
+        font=("Arial", 11)
+    ).pack(anchor="w")
+
+    error_label = ctk.CTkLabel(
         form,
-        width=250,
-        height=42,
-        placeholder_text="Age",
-        fg_color=INPUT_COLOR,
-        border_width=0
+        text="",
+        text_color=RED,
+        font=("Arial", 12)
     )
 
-    age_entry.grid(
-        row=0,
-        column=0,
-        padx=20,
-        pady=15
-    )
+    error_label.grid(row=4, column=0, columnspan=2, pady=(4, 0))
 
-    income_entry = ctk.CTkEntry(
-        form,
-        width=250,
-        height=42,
-        placeholder_text="Annual Income",
-        fg_color=INPUT_COLOR,
-        border_width=0
-    )
-
-    income_entry.grid(
-        row=0,
-        column=1,
-        padx=20,
-        pady=15
-    )
-
-    spending_entry = ctk.CTkEntry(
-        form,
-        width=250,
-        height=42,
-        placeholder_text="Spending Score",
-        fg_color=INPUT_COLOR,
-        border_width=0
-    )
-
-    spending_entry.grid(
-        row=1,
-        column=0,
-        padx=20,
-        pady=15
-    )
-
-    purchases_entry = ctk.CTkEntry(
-        form,
-        width=250,
-        height=42,
-        placeholder_text="Purchases per Month",
-        fg_color=INPUT_COLOR,
-        border_width=0
-    )
-
-    purchases_entry.grid(
-        row=1,
-        column=1,
-        padx=20,
-        pady=15
-    )
-
-    online_entry = ctk.CTkEntry(
-        form,
-        width=250,
-        height=42,
-        placeholder_text="Online Shopping Frequency",
-        fg_color=INPUT_COLOR,
-        border_width=0
-    )
-
-    online_entry.grid(
-        row=2,
-        column=0,
-        padx=20,
-        pady=15
-    )
-
-    category_entry = ctk.CTkEntry(
-        form,
-        width=250,
-        height=42,
-        placeholder_text="Preferred Category",
-        fg_color=INPUT_COLOR,
-        border_width=0
-    )
-
-    category_entry.grid(
-        row=2,
-        column=1,
-        padx=20,
-        pady=15
-    )
+    def show_error(message):
+        error_label.configure(text=message)
 
     def validate_customer():
-        
-        global current_persona
+
+        global current_persona, last_result
+
+        show_error("")
 
         age = age_entry.get().strip()
         income = income_entry.get().strip()
         spending = spending_entry.get().strip()
 
         if age == "" or income == "" or spending == "":
-            messagebox.showerror(
-                "Input Error",
-                "Please enter Age, Annual Income and Spending Score."
-            )
+            show_error("Please enter Age, Annual Income and Spending Score.")
             return
 
         try:
@@ -1142,79 +1419,94 @@ def customer_form_page():
             income_value = float(income)
             spending_value = float(spending)
         except ValueError:
-            messagebox.showerror(
-                "Input Error",
-                "Age, income and spending score must be numbers."
-            )
+            show_error("Age, income and spending score must be numbers.")
             return
 
         if age_value <= 0:
-            messagebox.showerror(
-                "Input Error",
-                "Age must be greater than zero."
-            )
+            show_error("Age must be greater than zero.")
             return
 
         if income_value < 0:
-            messagebox.showerror(
-                "Input Error",
-                "Income cannot be negative."
-            )
+            show_error("Income cannot be negative.")
             return
 
         if spending_value < 0:
-            messagebox.showerror(
-                "Input Error",
-                "Spending score cannot be negative."
-            )
+            show_error("Spending score cannot be negative.")
             return
 
-        messagebox.showinfo(
-            "Success",
-            "Customer information is valid!\n\n"
-            "The ML model will be connected by Member 3."
-        )
-        
+        if spending_value > 100:
+            show_error("Spending score must be between 0 and 100.")
+            return
+
+        gender = gender_menu.get()
+
+        category = category_entry.get().strip()
+        online_frequency = online_entry.get().strip()
+        purchases_text = purchases_entry.get().strip()
+        purchases_value = None
+
+        if purchases_text != "":
+            try:
+                purchases_value = float(purchases_text)
+            except ValueError:
+                show_error("Purchases per month must be a number.")
+                return
+
+            if purchases_value < 0:
+                show_error("Purchases per month cannot be negative.")
+                return
+
         try:
 
-            # Member 3 - ML prediction
-            cluster = predict_cluster(
+            # ML prediction (cluster + persona)
+            cluster, persona = predict_persona(
                 age_value,
                 gender,
                 income_value,
                 spending_value
             )
 
-            # Convert cluster to persona
-            current_persona = CLUSTER_TO_PERSONA.get(
+            current_persona = persona
+
+            # Recommendations
+            offers = get_offers(
+                current_persona,
+                category,
+                online_frequency,
+                purchases_value
+            )
+
+            recommendations = [offer["title"] for offer in offers]
+
+            # Save to prediction history
+            save_prediction(
+                current_user_id,
+                int(age_value),
+                gender,
+                income_value,
+                spending_value,
                 cluster,
-                "Unknown Persona"
+                current_persona,
+                "; ".join(recommendations)
             )
 
-            # Member 4 - Recommendations
-            recommendations = get_recommendations(
-                current_persona
-            )
+            # Show the result on its own page
+            last_result = {
+                "age": int(age_value),
+                "gender": gender,
+                "income": income_value,
+                "spending": spending_value,
+                "cluster": cluster,
+                "persona": current_persona,
+                "recommendations": recommendations,
+                "offers": offers
+            }
 
-            recommendation_text = "\n".join(
-                "• " + item for item in recommendations
-            )
-
-            # Display result
-            messagebox.showinfo(
-                "Prediction Result",
-                f"Cluster: {cluster}\n"
-                f"Persona: {current_persona}\n\n"
-                f"Recommendations:\n"
-                f"{recommendation_text}"
-            )
+            result_page(last_result)
 
         except Exception as e:
 
-            messagebox.showerror(
-                "Prediction Error",
-                f"Could not predict customer persona.\n\n{e}"
-            )
+            show_error(f"Could not predict customer persona: {e}")
 
     predict_button = ctk.CTkButton(
         form,
@@ -1229,10 +1521,10 @@ def customer_form_page():
     )
 
     predict_button.grid(
-        row=3,
+        row=5,
         column=0,
         columnspan=2,
-        pady=20
+        pady=(6, 4)
     )
 
     back_button = ctk.CTkButton(
@@ -1246,16 +1538,18 @@ def customer_form_page():
     )
 
     back_button.grid(
-        row=4,
+        row=6,
         column=0,
         columnspan=2,
-        pady=5
+        pady=(0, 8)
     )
 
 
 # =========================================================
 # START PROGRAM
 # =========================================================
+
+create_tables()
 
 welcome_page()
 
