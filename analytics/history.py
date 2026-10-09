@@ -1,6 +1,7 @@
 import pandas as pd
 import os
-HISTORY_FILE = "data/prediction_history.csv"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HISTORY_FILE = os.path.join(BASE_DIR, "data", "prediction_history.csv")
 def save_prediction(customer_id, income, spending_score, persona):
     new_record = pd.DataFrame({
         "CustomerID": [customer_id],
