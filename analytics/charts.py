@@ -1,7 +1,12 @@
+import os
 import pandas as pd
 import matplotlib.pyplot as plt
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_FILE = os.path.join(BASE_DIR, "data", "customers.csv")
+
 def income_vs_spending():
-    df = pd.read_csv("data/customers.csv")
+    df = pd.read_csv(DATA_FILE)
     plt.figure(figsize=(9, 6))
     personas = df["Persona"].unique()
     for persona in personas:
@@ -12,8 +17,15 @@ def income_vs_spending():
             label=persona,
             s=80
         )
+    plt.xlabel("Annual Income")
+    plt.ylabel("Spending Score")
+    plt.title("Income vs Spending Score")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 def persona_distribution():
-    df = pd.read_csv("data/customers.csv")
+    df = pd.read_csv(DATA_FILE)
     persona_counts = df["Persona"].value_counts()
     plt.figure(figsize=(9, 6))
     bars = plt.bar(
@@ -36,4 +48,6 @@ def persona_distribution():
     plt.grid(axis="y")
     plt.tight_layout()
     plt.show()
-persona_distribution()
+if __name__ == "__main__":
+    income_vs_spending()
+    persona_distribution()
