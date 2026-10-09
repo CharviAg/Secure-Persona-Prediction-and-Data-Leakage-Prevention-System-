@@ -2,6 +2,7 @@
 import sqlite3
 import streamlit as st
 import pandas as pd
+from datetime import date, timedelta
 
 from database import (
     DATABASE_NAME,
@@ -229,35 +230,97 @@ def get_persona_name(cluster):
     return personas.get(cluster, f"Customer Segment {cluster}")
 
 
-def get_recommendation(persona):
-    recommendations = {
-        "High-Value Customer": (
-            "Offer loyalty rewards, premium products, early access "
-            "to launches, and personalized offers."
-        ),
-        "Budget-Conscious Customer": (
-            "Highlight discounts, bundles, value packs, and "
-            "limited-time savings."
-        ),
-        "Potential Customer": (
-            "Use introductory offers, product recommendations, "
-            "and personalized follow-up campaigns."
-        ),
-        "Impulsive Spender": (
-            "Promote trending products, limited-time collections, "
-            "and complementary items without encouraging overspending."
-        ),
-        "Average Customer": (
-            "Use relevant product suggestions, seasonal campaigns, "
-            "and loyalty incentives to improve engagement."
-        ),
-    }
+OFFER_CATALOG = {
+    "High-Value Customer": {
+        "valid_days": 30,
+        "offers": [
+            ("Gold Member: 20% off {item}", "Exclusive member price this month.", "GOLD20"),
+            ("Early access to new {item}", "Shop new arrivals 48 hours early.", "EARLY48"),
+            ("Free express delivery", "Free delivery on eligible orders.", "FREEFAST"),
+            ("2x loyalty points", "Earn double reward points.", "POINTS2X"),
+        ],
+    },
+    "Budget-Conscious Customer": {
+        "valid_days": 14,
+        "offers": [
+            ("Flat 15% off {item}", "Save on eligible everyday purchases.", "SAVE15"),
+            ("Buy 2 Get 1 Free", "Combo deal on selected {item}.", "B2G1"),
+            ("Rs. 100 off above Rs. 999", "Save on qualifying orders.", "SAVE100"),
+            ("Seasonal sale: up to 40% off", "Discounts on selected {item}.", "SEASON40"),
+        ],
+    },
+    "Potential Customer": {
+        "valid_days": 21,
+        "offers": [
+            ("10% off your next order", "Discount on eligible {item}.", "WELCOME10"),
+            ("Free product demo / trial", "Try selected products where available.", "TRY7"),
+            ("Rs. 250 off above Rs. 1,999", "Save on qualifying orders.", "FIRST250"),
+            ("Extra 5% when you buy 2+", "Bundle selected {item}.", "BUNDLE5"),
+        ],
+    },
+    "Impulsive Spender": {
+        "valid_days": 3,
+        "offers": [
+            ("Flash sale: 25% off {item}", "Example limited-period discount.", "FLASH25"),
+            ("Trending now: 2 for 1", "Multi-buy deal on selected {item}.", "TREND2X"),
+            ("Spend Rs. 1,500, get Rs. 300 voucher", "Example qualifying-order voucher.", "VOUCH300"),
+            ("Free gift with your order", "Gift on selected {item}, subject to availability.", "GIFTFREE"),
+        ],
+    },
+    "Average Customer": {
+        "valid_days": 14,
+        "offers": [
+            ("10% off {item}", "Save on selected purchases.", "EVERYDAY10"),
+            ("Rs. 100 off above Rs. 799", "Discount on qualifying orders.", "REWARD100"),
+            ("Bundle and save", "Discount on selected bundles.", "BUNDLE10"),
+            ("Seasonal shopping deal", "Explore selected discounts on {item}.", "SEASONAL"),
+        ],
+    },
+}
 
-    return recommendations.get(
-        persona,
-        "Use personalized recommendations and review customer activity "
-        "to identify suitable offers.",
+FREQUENT_WORDS = ("daily", "weekly", "often", "every", "regular", "frequent")
+
+
+def get_offers(persona, category=None, online_frequency=None, purchases_per_month=None):
+    plan = OFFER_CATALOG.get(persona, OFFER_CATALOG["Average Customer"])
+    item = (category or "").strip() or "products"
+    expiry = (date.today() + timedelta(days=plan["valid_days"])).strftime("%d %b %Y")
+
+    offers = [
+        {
+            "title": title.format(item=item),
+            "detail": detail.format(item=item),
+            "code": code,
+            "valid_till": expiry,
+        }
+        for title, detail, code in plan["offers"]
+    ]
+
+    online = (online_frequency or "").strip().lower()
+    if online and any(word in online for word in FREQUENT_WORDS):
+        offers[3] = {
+            "title": "App & online exclusive: extra 5% off",
+            "detail": "Example offer for eligible online purchases.",
+            "code": "ONLINE5",
+            "valid_till": expiry,
+        }
+    elif purchases_per_month is not None and purchases_per_month >= 5:
+        offers[3] = {
+            "title": "Loyalty cashback: Rs. 200",
+            "detail": "Example reward for frequent monthly purchases.",
+            "code": "LOYAL200",
+            "valid_till": expiry,
+        }
+
+    return offers
+
+
+def get_recommendation(persona):
+    return " | ".join(
+        f"{offer['title']} (Code: {offer['code']})"
+        for offer in get_offers(persona)
     )
+
 
 
 def show_brand():
