@@ -1,51 +1,66 @@
 """
 predict persona
-It loads the pre-trained model + scaler
-(from train_model.py) and exposes one clean function:
+Loads the pre-trained model + scaler (from train_model.py) and exposes:
 
     predict_cluster(age, gender, income, spending_score) -> int
+    predict_persona(age, gender, income, spending_score) -> (int, str)
 
+If the saved model files are missing (or cannot be loaded because of a
+scikit-learn version change) the model is trained again automatically.
 """
 
+import os
+import json
 import pickle
 import numpy as np
-import os
+
+import train_model
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "kmeans_model.pkl")
 SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
+MAP_PATH = os.path.join(BASE_DIR, "cluster_persona_map.json")
+
+
+def _load():
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            model = pickle.load(f)
+        with open(SCALER_PATH, "rb") as f:
+            scaler = pickle.load(f)
+        with open(MAP_PATH) as f:
+            persona_map = {int(k): v for k, v in json.load(f).items()}
+        return model, scaler, persona_map
+    except Exception:
+        model, scaler, persona_map, _ = train_model.train()
+        return model, scaler, persona_map
+
 
 # Load once at import time (not on every call)
-with open(MODEL_PATH, "rb") as f:
-    _kmeans_model = pickle.load(f)
-
-with open(SCALER_PATH, "rb") as f:
-    _scaler = pickle.load(f)
+_kmeans_model, _scaler, _persona_map = _load()
 
 
-def predict_cluster(age: int, gender: str, income: float, spending_score: float) -> int:
+def predict_cluster(age: float, gender: str, income: float, spending_score: float) -> int:
     """
-    Takes a new user's details and returns their predicted cluster number.
+    Returns the predicted cluster number.
 
-    Parameters:
-        age (int): user's age
-        gender (str): "Male" or "Female"
-        income (float): annual income (same units/scale as training data, e.g. k$)
-        spending_score (float): spending score, typically 1-100
-
-    Returns:
-        int: cluster number (e.g. 0-4 if trained with k=5)
+    gender: "Male" or "Female"
+    income: same units as the training data (Rs. thousands)
+    spending_score: 1-100
     """
-    gender_encoded = 0 if gender.lower() == "male" else 1
+    gender_encoded = 0 if str(gender).strip().lower() == "male" else 1
 
-    input_data = np.array([[age, gender_encoded, income, spending_score]])
+    input_data = np.array([[age, gender_encoded, income, spending_score]], dtype=float)
     scaled_input = _scaler.transform(input_data)
 
-    cluster = _kmeans_model.predict(scaled_input)[0]
-    return int(cluster)
+    return int(_kmeans_model.predict(scaled_input)[0])
 
 
-# Quick manual test — only runs if you execute this file directly
+def predict_persona(age, gender, income, spending_score):
+    """Returns (cluster, persona name)."""
+    cluster = predict_cluster(age, gender, income, spending_score)
+    return cluster, _persona_map.get(cluster, "Unknown Persona")
+
+
 if __name__ == "__main__":
-    test_cluster = predict_cluster(25, "Female", 60, 75)
-    print(f"Predicted cluster: {test_cluster}")
+    print(predict_persona(25, "Female", 60, 75))
