@@ -1,6 +1,11 @@
-
+import os
+import json
 import sqlite3
-import streamlit as st
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+
+import streamlit as st  # type: ignore[import-not-found]
 import pandas as pd
 from datetime import date, timedelta
 
@@ -13,13 +18,14 @@ from database import (
     update_user,
     delete_user,
 )
+
 from security import (
     hash_password,
     verify_password,
     check_password_strength,
 )
-from predict_persona import predict_cluster
 
+from predict_persona import predict_cluster
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
@@ -33,12 +39,12 @@ st.set_page_config(
 )
 
 
+
 # --------------------------------------------------
 # DATABASE INITIALIZATION
 # --------------------------------------------------
 
 create_tables()
-
 
 # --------------------------------------------------
 # SESSION STATE
@@ -52,7 +58,6 @@ if "page" not in st.session_state:
 
 if "last_prediction" not in st.session_state:
     st.session_state.last_prediction = None
-
 
 # --------------------------------------------------
 # DESIGN / CSS
@@ -181,7 +186,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 # --------------------------------------------------
 # HELPER FUNCTIONS
 # --------------------------------------------------
@@ -230,106 +234,395 @@ def get_persona_name(cluster):
     return personas.get(cluster, f"Customer Segment {cluster}")
 
 
+def get_explanation(persona, income, spending_score):
+    """Return a human-readable explanation for the predicted persona."""
+    income_label = "low income" if income < 50000 else (
+        "mid-range income" if income < 100000 else "high income"
+    )
+
+    if spending_score < 35:
+        spending_label = "conservative spender"
+    elif spending_score < 70:
+        spending_label = "balanced spender"
+    else:
+        spending_label = "high-spend shopper"
+
+    persona_map = {
+        "High-Value Customer": (
+            "This customer has strong purchasing power and is likely to "
+            "respond well to premium offers, loyalty benefits, and high-quality "
+            "products."
+        ),
+        "Budget-Conscious Customer": (
+            "This customer prioritizes value and affordability, so promotions, "
+            "bundles, and budget-friendly options are likely to resonate."
+        ),
+        "Potential Customer": (
+            "This customer appears to be a promising prospect with room to grow. "
+            "Introductory offers and trial-oriented promotions can help convert "
+            "interest into repeat purchases."
+        ),
+        "Impulsive Spender": (
+            "This customer is highly motivated by urgency and emotional purchase "
+            "triggers, making limited-time deals and fast-conversion offers useful."
+        ),
+        "Average Customer": (
+            "This customer shows a moderate, steady buying pattern and is best "
+            "served with practical offers, convenience, and reliable value."
+        ),
+    }
+
+    base_text = persona_map.get(
+        persona,
+        "This segment reflects a customer profile with a steady purchase pattern.",
+    )
+
+    return (
+        f"{base_text} Based on an income profile of {income_label} and a "
+        f"spending pattern classified as a {spending_label}, this customer is "
+        f"best matched to {persona}."
+    )
+
+
+# Legacy example offers are retained for compatibility,
+# but the app displays live shopping results instead.
 OFFER_CATALOG = {
     "High-Value Customer": {
         "valid_days": 30,
         "offers": [
-            ("Gold Member: 20% off {item}", "Exclusive member price this month.", "GOLD20"),
-            ("Early access to new {item}", "Shop new arrivals 48 hours early.", "EARLY48"),
-            ("Free express delivery", "Free delivery on eligible orders.", "FREEFAST"),
-            ("2x loyalty points", "Earn double reward points.", "POINTS2X"),
+            (
+                "Gold Member: 20% off {item}",
+                "Exclusive member price on eligible orders this month.",
+                "GOLD20",
+            ),
+            (
+                "Early access to new {item}",
+                "Shop new arrivals 48 hours before everyone else.",
+                "EARLY48",
+            ),
+            (
+                "Free express delivery",
+                "No delivery charge on eligible orders.",
+                "FREEFAST",
+            ),
+            (
+                "2x loyalty points",
+                "Earn double reward points on eligible purchases.",
+                "POINTS2X",
+            ),
+        ],
+    },
+    "Budget Customer": {
+        "valid_days": 14,
+        "offers": [
+            (
+                "Flat 15% off {item}",
+                "Everyday savings on eligible purchases.",
+                "SAVE15",
+            ),
+            (
+                "Buy 2 Get 1 Free",
+                "Combo deal on selected {item}.",
+                "B2G1",
+            ),
+            (
+                "Rs. 100 off above Rs. 999",
+                "Instant discount on eligible larger orders.",
+                "SAVE100",
+            ),
+            (
+                "Seasonal sale: up to 40% off",
+                "Discounts on selected {item}.",
+                "SEASON40",
+            ),
         ],
     },
     "Budget-Conscious Customer": {
         "valid_days": 14,
         "offers": [
-            ("Flat 15% off {item}", "Save on eligible everyday purchases.", "SAVE15"),
-            ("Buy 2 Get 1 Free", "Combo deal on selected {item}.", "B2G1"),
-            ("Rs. 100 off above Rs. 999", "Save on qualifying orders.", "SAVE100"),
-            ("Seasonal sale: up to 40% off", "Discounts on selected {item}.", "SEASON40"),
+            (
+                "Flat 15% off {item}",
+                "Everyday savings on eligible purchases.",
+                "SAVE15",
+            ),
+            (
+                "Buy 2 Get 1 Free",
+                "Combo deal on selected {item}.",
+                "B2G1",
+            ),
+            (
+                "Rs. 100 off above Rs. 999",
+                "Instant discount on eligible larger orders.",
+                "SAVE100",
+            ),
+            (
+                "Seasonal sale: up to 40% off",
+                "Discounts on selected {item}.",
+                "SEASON40",
+            ),
         ],
     },
     "Potential Customer": {
         "valid_days": 21,
         "offers": [
-            ("10% off your next order", "Discount on eligible {item}.", "WELCOME10"),
-            ("Free product demo / trial", "Try selected products where available.", "TRY7"),
-            ("Rs. 250 off above Rs. 1,999", "Save on qualifying orders.", "FIRST250"),
-            ("Extra 5% when you buy 2+", "Bundle selected {item}.", "BUNDLE5"),
+            (
+                "10% off your next order",
+                "An introductory discount on eligible {item}.",
+                "WELCOME10",
+            ),
+            (
+                "Free product demo / trial",
+                "Try selected products where a trial is available.",
+                "TRY7",
+            ),
+            (
+                "Rs. 250 off above Rs. 1,999",
+                "A first-purchase savings on selected {item}.",
+                "SAVE250",
+            ),
+            (
+                "Special launch bundle offer",
+                "Bundle starter products for a lower intro price.",
+                "BUNDLE",
+            ),
         ],
     },
     "Impulsive Spender": {
-        "valid_days": 3,
+        "valid_days": 7,
         "offers": [
-            ("Flash sale: 25% off {item}", "Example limited-period discount.", "FLASH25"),
-            ("Trending now: 2 for 1", "Multi-buy deal on selected {item}.", "TREND2X"),
-            ("Spend Rs. 1,500, get Rs. 300 voucher", "Example qualifying-order voucher.", "VOUCH300"),
-            ("Free gift with your order", "Gift on selected {item}, subject to availability.", "GIFTFREE"),
+            (
+                "Flash 12% off today only",
+                "A short-lived discount for immediate purchases.",
+                "FLASH12",
+            ),
+            (
+                "Buy now, pay later offer",
+                "Flexible checkout promotion for eligible baskets.",
+                "BNPL",
+            ),
+            (
+                "Free gift with premium item",
+                "Add a premium item to your basket and unlock a gift.",
+                "GIFTPREM",
+            ),
+            (
+                "Exclusive clearance deal",
+                "Limited-time markdowns on selected {item}.",
+                "CLEAR70",
+            ),
         ],
     },
     "Average Customer": {
-        "valid_days": 14,
+        "valid_days": 21,
         "offers": [
-            ("10% off {item}", "Save on selected purchases.", "EVERYDAY10"),
-            ("Rs. 100 off above Rs. 799", "Discount on qualifying orders.", "REWARD100"),
-            ("Bundle and save", "Discount on selected bundles.", "BUNDLE10"),
-            ("Seasonal shopping deal", "Explore selected discounts on {item}.", "SEASONAL"),
+            (
+                "Standard 5% off",
+                "A straightforward discount on eligible {item}.",
+                "SAVE5",
+            ),
+            (
+                "Free shipping on orders above Rs. 1,499",
+                "Convenient delivery on qualifying purchases.",
+                "FREESHIP",
+            ),
+            (
+                "Loyalty points bonus",
+                "Earn extra points on your next qualifying order.",
+                "LOYAL2X",
+            ),
+            (
+                "Weekend bundle offer",
+                "Bundle selected essentials at a convenient price.",
+                "WEEKEND",
+            ),
         ],
     },
 }
 
-FREQUENT_WORDS = ("daily", "weekly", "often", "every", "regular", "frequent")
+# --------------------------------------------------
+# LIVE SHOPPING RECOMMENDATIONS
+# --------------------------------------------------
+
+def get_serpapi_key():
+    try:
+        key = st.secrets.get("SERPAPI_KEY", "")
+    except Exception:
+        key = ""
+
+    return key or os.getenv("SERPAPI_KEY", "")
 
 
-def get_offers(persona, category=None, online_frequency=None, purchases_per_month=None):
-    plan = OFFER_CATALOG.get(persona, OFFER_CATALOG["Average Customer"])
-    item = (category or "").strip() or "products"
-    expiry = (date.today() + timedelta(days=plan["valid_days"])).strftime("%d %b %Y")
+@st.cache_data(ttl=1800, show_spinner=False)
+def search_live_shopping(query, api_key, on_sale=False):
+    """Fetch current multi-store listings from Google Shopping via SerpApi."""
 
-    offers = [
-        {
-            "title": title.format(item=item),
-            "detail": detail.format(item=item),
-            "code": code,
-            "valid_till": expiry,
-        }
-        for title, detail, code in plan["offers"]
-    ]
+    params = {
+        "engine": "google_shopping",
+        "q": query,
+        "api_key": api_key,
+        "gl": "in",
+        "hl": "en",
+        "google_domain": "google.co.in",
+    }
 
-    online = (online_frequency or "").strip().lower()
-    if online and any(word in online for word in FREQUENT_WORDS):
-        offers[3] = {
-            "title": "App & online exclusive: extra 5% off",
-            "detail": "Example offer for eligible online purchases.",
-            "code": "ONLINE5",
-            "valid_till": expiry,
-        }
-    elif purchases_per_month is not None and purchases_per_month >= 5:
-        offers[3] = {
-            "title": "Loyalty cashback: Rs. 200",
-            "detail": "Example reward for frequent monthly purchases.",
-            "code": "LOYAL200",
-            "valid_till": expiry,
-        }
+    if on_sale:
+        params["on_sale"] = "true"
 
-    return offers
+    url = "https://serpapi.com/search.json?" + urlencode(params)
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "CustomerPersonaAnalytics/1.0"
+        },
+    )
+
+    with urlopen(request, timeout=20) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+
+    return data.get("shopping_results", [])
 
 
-def get_recommendation(persona):
-    return " | ".join(
-        f"{offer['title']} (Code: {offer['code']})"
-        for offer in get_offers(persona)
+def render_live_products(category, budget=None, on_sale=False):
+    """Render live products and sale listings from multiple retailers."""
+
+    api_key = get_serpapi_key()
+
+    if not api_key:
+        st.warning(
+            "Live recommendations need a SerpApi key. Add SERPAPI_KEY "
+            "to Streamlit Cloud Secrets or your local environment."
+        )
+        st.markdown(
+            "Create a key at "
+            "[SerpApi](https://serpapi.com/manage-api-key). "
+            "Google Shopping results can include multiple merchants, "
+            "prices, and product links."
+        )
+        return
+
+    query = (category or "products").strip()
+
+    if on_sale:
+        query += " deals discounts"
+
+    try:
+        with st.spinner(
+            "Finding current products and offers across stores..."
+        ):
+            products = search_live_shopping(
+                query,
+                api_key,
+                on_sale=on_sale,
+            )
+
+    except Exception as error:
+        st.error(f"Could not load live shopping results: {error}")
+        return
+
+    # Apply the maximum budget if the user entered one.
+    if budget is not None:
+        products = [
+            product
+            for product in products
+            if product.get("extracted_price") is not None
+            and product.get("extracted_price") <= budget
+        ]
+
+    # Show listings identified as sale listings.
+    if on_sale:
+        products = [
+            product
+            for product in products
+            if product.get("old_price") or product.get("tag")
+        ]
+
+    if not products:
+        st.info(
+            "No matching listings were returned. Try another category "
+            "or increase the budget."
+        )
+        return
+
+    # Display up to eight listings in two columns.
+    for start in range(0, min(len(products), 8), 2):
+        columns = st.columns(2)
+
+        for column, product in zip(
+            columns,
+            products[start:start + 2],
+        ):
+            with column:
+                with st.container(border=True):
+                    title = product.get(
+                        "title",
+                        "Product listing",
+                    )
+
+                    image_url = product.get("thumbnail", "")
+
+                    if image_url.startswith("https://"):
+                        st.image(image_url, width=150)
+
+                    st.markdown(f"**{title}**")
+
+                    st.markdown(
+                        f"### {product.get('price', 'Price not listed')}"
+                    )
+
+                    if product.get("old_price"):
+                        st.markdown(
+                            f"~~{product['old_price']}~~ · Sale listing"
+                        )
+
+                    st.caption(
+                        f"Store: {product.get('source', 'Retailer not listed')}"
+                    )
+
+                    if product.get("rating"):
+                        st.caption(
+                            f"Rating: {product['rating']} · "
+                            f"Reviews: {product.get('reviews', 'not listed')}"
+                        )
+
+                    link = (
+                        product.get("link")
+                        or product.get("product_link")
+                    )
+
+                    if link and link.startswith("https://"):
+                        st.link_button(
+                            "View store listing",
+                            link,
+                            use_container_width=True,
+                        )
+                    else:
+                        st.caption("No product link was provided.")
+
+    st.caption(
+        "Prices and availability can change. Check the retailer page "
+        "before buying. Sale listings are not guaranteed coupon codes."
     )
 
 
+# --------------------------------------------------
+# COMMON UI FUNCTIONS
+# --------------------------------------------------
 
 def show_brand():
     st.markdown(
-        '<div class="brand">CP <span style="color:#F8FAFC;">Analytics</span></div>',
+        '<div class="brand">CP '
+        '<span style="color:#F8FAFC;">Analytics</span></div>',
         unsafe_allow_html=True,
     )
+
     st.markdown(
-        '<div class="subtitle">Understand customers. Make smarter decisions.</div>',
+        '<div class="subtitle">'
+        'Understand customers. Make smarter decisions.'
+        '</div>',
         unsafe_allow_html=True,
     )
 
@@ -382,19 +675,30 @@ def welcome_page():
         )
 
         st.markdown("### Your customer intelligence workspace")
-        st.write("• Predict customer segments using your trained ML model")
+
+        st.write(
+            "• Predict customer segments using your trained ML model"
+        )
         st.write("• Save and review your prediction history")
-        st.write("• Get recommendations tailored to customer segments")
+        st.write(
+            "• Get recommendations tailored to customer segments"
+        )
 
     with right:
         st.markdown("### Welcome")
         st.write("Sign in to continue or create your account.")
 
-        if st.button("Login to your account", use_container_width=True):
+        if st.button(
+            "Login to your account",
+            use_container_width=True,
+        ):
             st.session_state.page = "Login"
             st.rerun()
 
-        if st.button("Create a new account", use_container_width=True):
+        if st.button(
+            "Create a new account",
+            use_container_width=True,
+        ):
             st.session_state.page = "Register"
             st.rerun()
 
@@ -411,18 +715,26 @@ def login_page():
 
     with left:
         st.markdown("## Welcome back")
+
         st.write(
             "Sign in to access your customer persona dashboard, "
             "predictions, and saved history."
         )
 
         st.markdown("---")
+
         st.write("**Customer insights**")
         st.write("Predict segments from customer attributes.")
+
         st.write("**Prediction history**")
-        st.write("Review previous predictions whenever you need them.")
+        st.write(
+            "Review previous predictions whenever you need them."
+        )
+
         st.write("**Personalized recommendations**")
-        st.write("Explore ideas for engaging different customer segments.")
+        st.write(
+            "Explore ideas for engaging different customer segments."
+        )
 
     with right:
         st.markdown("### Login")
@@ -446,7 +758,9 @@ def login_page():
 
         if submitted:
             if not identity.strip() or not password:
-                st.error("Please enter both your username/email and password.")
+                st.error(
+                    "Please enter both your username/email and password."
+                )
             else:
                 try:
                     user = find_user_for_login(identity)
@@ -459,11 +773,15 @@ def login_page():
                             "phone": user[3],
                             "username": user[4],
                         }
+
                         st.session_state.page = "Dashboard"
                         st.success("Login successful!")
                         st.rerun()
+
                     else:
-                        st.error("Incorrect username/email or password.")
+                        st.error(
+                            "Incorrect username/email or password."
+                        )
 
                 except Exception as error:
                     st.error(f"Login failed: {error}")
@@ -472,7 +790,10 @@ def login_page():
             st.session_state.page = "Register"
             st.rerun()
 
-        if st.button("Back to welcome page", use_container_width=True):
+        if st.button(
+            "Back to welcome page",
+            use_container_width=True,
+        ):
             st.session_state.page = "Welcome"
             st.rerun()
 
@@ -493,7 +814,10 @@ def register_page():
         email = st.text_input("Email address")
         phone = st.text_input("Phone number")
         username = st.text_input("Choose a username")
-        password = st.text_input("Create password", type="password")
+        password = st.text_input(
+            "Create password",
+            type="password",
+        )
         confirm_password = st.text_input(
             "Confirm password",
             type="password",
@@ -526,12 +850,18 @@ def register_page():
             ]
         ):
             st.error("Please complete every field.")
+
         elif "@" not in email or "." not in email.split("@")[-1]:
             st.error("Please enter a valid email address.")
+
         elif len(password) < 8:
-            st.error("Your password must contain at least 8 characters.")
+            st.error(
+                "Your password must contain at least 8 characters."
+            )
+
         elif password != confirm_password:
             st.error("The passwords do not match.")
+
         else:
             try:
                 register_user(
@@ -541,7 +871,11 @@ def register_page():
                     username.strip(),
                     hash_password(password),
                 )
-                st.success("Account created successfully! You can now log in.")
+
+                st.success(
+                    "Account created successfully! You can now log in."
+                )
+
                 st.session_state.page = "Login"
                 st.rerun()
 
@@ -550,6 +884,7 @@ def register_page():
                     "That username or email is already registered. "
                     "Please choose another."
                 )
+
             except Exception as error:
                 st.error(f"Could not create account: {error}")
 
@@ -568,14 +903,19 @@ def register_page():
 
 def dashboard_page():
     user = st.session_state.user
-
     show_brand()
+
+    safe_name = (
+        user["name"]
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
     st.markdown(
         f"""
         <div class="hero">
             <div class="hero-title">
-                Hello, {user["name"].replace("<", "&lt;").replace(">", "&gt;")}!
+                Hello, {safe_name}!
             </div>
             <div class="hero-text">
                 Welcome to your customer intelligence dashboard.
@@ -592,7 +932,10 @@ def dashboard_page():
         history = []
 
     total_predictions = len(history)
-    latest_persona = history[0][6] if history else "No predictions yet"
+
+    latest_persona = (
+        history[0][6] if history else "No predictions yet"
+    )
 
     col1, col2, col3 = st.columns(3)
 
@@ -613,21 +956,33 @@ def dashboard_page():
     with col1:
         st.markdown("#### Predict persona")
         st.write("Enter customer details and predict a segment.")
-        if st.button("Open prediction", use_container_width=True):
+
+        if st.button(
+            "Open prediction",
+            use_container_width=True,
+        ):
             st.session_state.page = "Predict"
             st.rerun()
 
     with col2:
         st.markdown("#### Prediction history")
         st.write("Review your previously saved predictions.")
-        if st.button("View history", use_container_width=True):
+
+        if st.button(
+            "View history",
+            use_container_width=True,
+        ):
             st.session_state.page = "History"
             st.rerun()
 
     with col3:
         st.markdown("#### Account settings")
         st.write("View and update your profile details.")
-        if st.button("Manage account", use_container_width=True):
+
+        if st.button(
+            "Manage account",
+            use_container_width=True,
+        ):
             st.session_state.page = "Account"
             st.rerun()
 
@@ -640,6 +995,7 @@ def prediction_page():
     show_brand()
 
     st.markdown("## Predict customer persona")
+
     st.write(
         "Enter the customer's information below. "
         "Your trained model will predict a customer cluster."
@@ -680,6 +1036,28 @@ def prediction_page():
                 step=1.0,
             )
 
+            product_category = st.selectbox(
+                "Product category for recommendations",
+                [
+                    "Clothing",
+                    "Electronics",
+                    "Beauty",
+                    "Home & Living",
+                    "Accessories",
+                    "Groceries",
+                    "Sports",
+                    "Other",
+                ],
+            )
+
+            max_budget = st.number_input(
+                "Maximum product budget (₹)",
+                min_value=0,
+                value=3000,
+                step=500,
+                help="Set to 0 to show products at any price.",
+            )
+
         submitted = st.form_submit_button(
             "Predict customer persona",
             use_container_width=True,
@@ -695,7 +1073,17 @@ def prediction_page():
             )
 
             persona = get_persona_name(cluster)
-            recommendation = get_recommendation(persona)
+
+            budget_filter = (
+                float(max_budget) if max_budget > 0 else None
+            )
+
+            recommendation = (
+                f"Live product search: {product_category}; "
+                f"maximum budget: "
+                f"₹{max_budget if max_budget > 0 else 'unlimited'}. "
+                "Live listings are fetched when viewed."
+            )
 
             save_prediction(
                 st.session_state.user["user_id"],
@@ -716,6 +1104,13 @@ def prediction_page():
                 "cluster": int(cluster),
                 "persona": persona,
                 "recommendation": recommendation,
+                "category": product_category,
+                "budget": budget_filter,
+                "explanation": get_explanation(
+                    persona,
+                    income,
+                    spending_score,
+                ),
             }
 
             st.success("Prediction completed and saved!")
@@ -725,6 +1120,7 @@ def prediction_page():
                 "The model files were not found. Ensure "
                 "kmeans_model.pkl and scaler.pkl are in your repository."
             )
+
         except Exception as error:
             st.error(f"Prediction failed: {error}")
 
@@ -738,10 +1134,13 @@ def prediction_page():
 
         with col1:
             st.markdown("#### Predicted segment")
+
             st.markdown(
                 f"""
                 <div class="hero">
-                    <div class="hero-title">{result["persona"]}</div>
+                    <div class="hero-title">
+                        {result["persona"]}
+                    </div>
                     <div class="hero-text">
                         Model cluster: {result["cluster"]}
                     </div>
@@ -752,17 +1151,48 @@ def prediction_page():
 
         with col2:
             st.markdown("#### Customer details")
+
             st.write(f'**Age:** {result["age"]}')
             st.write(f'**Gender:** {result["gender"]}')
-            st.write(f'**Annual income:** {result["income"]:,.2f}')
-            st.write(f'**Spending score:** {result["spending_score"]:.0f}')
 
-        st.markdown("#### Suggested action")
-        st.info(result["recommendation"])
+            st.write(
+                f'**Annual income:** {result["income"]:,.2f}'
+            )
+
+            st.write(
+                f'**Spending score:** {result["spending_score"]:.0f}'
+            )
+
+        st.markdown("#### Customer insight")
+        st.info(result["explanation"])
+
+        st.markdown("### Product Suggestions")
 
         st.caption(
-            "Segment names and recommendations are illustrative. "
-            "Validate cluster meanings against your model's training data."
+            "Live product listings and sale prices from multiple stores."
+        )
+
+        product_tab, deals_tab = st.tabs(
+            ["Recommended products", "Current deals"]
+        )
+
+        with product_tab:
+            render_live_products(
+                result.get("category", "products"),
+                result.get("budget"),
+                on_sale=False,
+            )
+
+        with deals_tab:
+            render_live_products(
+                result.get("category", "products"),
+                result.get("budget"),
+                on_sale=True,
+            )
+
+        st.caption(
+            "Persona labels are illustrative; validate cluster meanings "
+            "against your model's training data."
         )
 
     if st.button("Back to dashboard"):
@@ -778,7 +1208,10 @@ def history_page():
     show_brand()
 
     st.markdown("## Prediction history")
-    st.write("Your previously saved customer persona predictions.")
+
+    st.write(
+        "Your previously saved customer persona predictions."
+    )
 
     try:
         history = get_prediction_history(
@@ -790,6 +1223,7 @@ def history_page():
                 "You have no saved predictions yet. "
                 "Make your first prediction to see it here."
             )
+
         else:
             df = pd.DataFrame(
                 history,
@@ -839,12 +1273,25 @@ def account_page():
     user = st.session_state.user
 
     st.markdown("## Account settings")
+
     st.write("View and update your profile information.")
 
     with st.form("account_form"):
-        name = st.text_input("Full name", value=user["name"])
-        email = st.text_input("Email address", value=user["email"])
-        phone = st.text_input("Phone number", value=user["phone"])
+        name = st.text_input(
+            "Full name",
+            value=user["name"],
+        )
+
+        email = st.text_input(
+            "Email address",
+            value=user["email"],
+        )
+
+        phone = st.text_input(
+            "Phone number",
+            value=user["phone"],
+        )
+
         username = st.text_input(
             "Username",
             value=user["username"],
@@ -857,10 +1304,19 @@ def account_page():
         )
 
     if submitted:
-        if not name.strip() or not email.strip() or not phone.strip():
+        if (
+            not name.strip()
+            or not email.strip()
+            or not phone.strip()
+        ):
             st.error("Name, email, and phone are required.")
-        elif "@" not in email or "." not in email.split("@")[-1]:
+
+        elif (
+            "@" not in email
+            or "." not in email.split("@")[-1]
+        ):
             st.error("Please enter a valid email address.")
+
         else:
             try:
                 update_user(
@@ -871,7 +1327,11 @@ def account_page():
                 )
 
                 st.session_state.user["name"] = name.strip()
-                st.session_state.user["email"] = email.strip().lower()
+
+                st.session_state.user["email"] = (
+                    email.strip().lower()
+                )
+
                 st.session_state.user["phone"] = phone.strip()
 
                 st.success("Your profile has been updated.")
@@ -879,11 +1339,15 @@ def account_page():
 
             except sqlite3.IntegrityError:
                 st.error("That email address is already in use.")
+
             except Exception as error:
-                st.error(f"Could not update your profile: {error}")
+                st.error(
+                    f"Could not update your profile: {error}"
+                )
 
     st.markdown("---")
     st.markdown("### Delete account")
+
     st.warning(
         "Deleting your account is permanent. Your saved predictions "
         "may remain in the database because of the existing database "
@@ -894,16 +1358,25 @@ def account_page():
         "I understand that this action cannot be easily undone."
     )
 
-    if st.button("Delete my account", use_container_width=True):
+    if st.button(
+        "Delete my account",
+        use_container_width=True,
+    ):
         if not confirm_delete:
             st.error("Please confirm before deleting your account.")
+
         else:
             try:
                 delete_user(user["user_id"])
+
                 st.success("Your account has been deleted.")
+
                 logout()
+
             except Exception as error:
-                st.error(f"Could not delete account: {error}")
+                st.error(
+                    f"Could not delete account: {error}"
+                )
 
     if st.button("Back to dashboard"):
         st.session_state.page = "Dashboard"
@@ -919,11 +1392,15 @@ def sidebar_navigation():
 
     with st.sidebar:
         show_brand()
+
         st.write("")
         st.markdown("---")
 
         st.markdown("### Navigation")
-        st.caption(f"Signed in as **{user['username']}**")
+
+        st.caption(
+            f"Signed in as **{user['username']}**"
+        )
 
         pages = {
             "Dashboard": "Dashboard",
@@ -933,13 +1410,19 @@ def sidebar_navigation():
         }
 
         for label, page in pages.items():
-            if st.button(label, use_container_width=True):
+            if st.button(
+                label,
+                use_container_width=True,
+            ):
                 st.session_state.page = page
                 st.rerun()
 
         st.markdown("---")
 
-        if st.button("Logout", use_container_width=True):
+        if st.button(
+            "Logout",
+            use_container_width=True,
+        ):
             logout()
 
 
@@ -950,8 +1433,10 @@ def sidebar_navigation():
 if st.session_state.user is None:
     if st.session_state.page == "Register":
         register_page()
+
     elif st.session_state.page == "Login":
         login_page()
+
     else:
         welcome_page()
 
@@ -962,10 +1447,13 @@ else:
 
     if current_page == "Predict":
         prediction_page()
+
     elif current_page == "History":
         history_page()
+
     elif current_page == "Account":
         account_page()
+
     else:
         st.session_state.page = "Dashboard"
         dashboard_page()
